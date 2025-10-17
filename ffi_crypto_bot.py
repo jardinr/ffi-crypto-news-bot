@@ -94,7 +94,7 @@ class FFICryptoBot:
             'telegram_api_hash': os.getenv('TELEGRAM_API_HASH', ''),
             'telegram_phone': os.getenv('TELEGRAM_PHONE', ''),
             'max_articles_per_run': int(os.getenv('MAX_ARTICLES_PER_RUN', '10')),
-            'hours_lookback': int(os.getenv('HOURS_LOOKBACK', '3')),
+            'hours_lookback': int(os.getenv('HOURS_LOOKBACK', '24')),
             'enable_german': os.getenv('ENABLE_GERMAN_TRANSLATION', 'true').lower() == 'true',
             'enable_telegram_scraping': os.getenv('ENABLE_TELEGRAM_SCRAPING', 'true').lower() == 'true'
         }
@@ -201,7 +201,7 @@ class FFICryptoBot:
             return "[German translation unavailable]"
         
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={self.config['gemini_api_key']}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.config['gemini_api_key']}"
             
             payload = {
                 "contents": [{
