@@ -2,7 +2,7 @@
 """
 FFI Crypto News Bot with German Translation - Multi-Discord Support
 Advanced cryptocurrency news aggregator with dual-language support
-Supports multiple Discord webhooks for different servers
+Uses OpenAI for reliable German translation
 """
 
 import asyncio
@@ -11,16 +11,14 @@ import feedparser
 import json
 import logging
 import os
-import re
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-import requests
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime )s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler('ffi_crypto_bot.log')
@@ -36,9 +34,9 @@ class FFICryptoNewsBot:
         self.config = {
             'telegram_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
             'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID', ''),
-            'discord_webhook': os.getenv('DISCORD_WEBHOOK_URL', ''),  # Original webhook
-            'discord_webhook_ffi': os.getenv('DISCORD_WEBHOOK_FFI', ''),  # New FFI server webhook
-            'gemini_api_key': os.getenv('GEMINI_API_KEY', ''),
+            'discord_webhook': os.getenv('DISCORD_WEBHOOK_URL', ''),
+            'discord_webhook_ffi': os.getenv('DISCORD_WEBHOOK_FFI', ''),
+            'openai_api_key': os.getenv('OPENAI_API_KEY', ''),
             'max_articles': int(os.getenv('MAX_ARTICLES_PER_RUN', '8')),
             'hours_lookback': int(os.getenv('HOURS_LOOKBACK', '3'))
         }
@@ -73,7 +71,7 @@ class FFICryptoNewsBot:
         
         # Load processed articles
         self.processed_file = 'processed_articles.json'
-        self.processed_articles = self.load_processed_articles()
+        self.processed_articles = self.load_processed_articles( )
         
         logger.info(f"📚 Loaded {len(self.processed_articles)} processed articles")
     
@@ -122,11 +120,11 @@ class FFICryptoNewsBot:
             # If we can't parse the time, assume it's recent
             return True
     
-    async def fetch_rss_feed(self, session: aiohttp.ClientSession, name: str, url: str) -> List[Dict]:
+    async def fetch_rss_feed(self, session: aiohttp.ClientSession, name: str, url: str ) -> List[Dict]:
         """Fetch and parse RSS feed."""
         try:
             logger.info(f"🔍 Fetching RSS feed from {name}")
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10 )) as response:
                 if response.status == 200:
                     content = await response.text()
                     feed = feedparser.parse(content)
@@ -155,31 +153,46 @@ class FFICryptoNewsBot:
         return []
     
     async def translate_to_german(self, text: str) -> str:
-        """Translate text to German using Gemini AI."""
+        """Translate text to German using OpenAI."""
         try:
-            if not self.config['gemini_api_key']:
-                logger.warning("💬 Gemini API key not configured, skipping German translation")
-                return f"[German translation unavailable]"
+            if not self.config['openai_api_key']:
+                logger.warning("💬 OpenAI API key not configured, skipping German translation")
+                return "[German translation unavailable]"
             
-            # Use Gemini API for translation
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={self.config['gemini_api_key']}"
+            # Use OpenAI API for translation
+            url = "https://api.openai.com/v1/chat/completions"
             
-            payload = {
-                "contents": [{
-                    "parts": [{
-                        "text": f"Translate the following cryptocurrency news text to German. Keep technical terms and proper nouns in their original form when appropriate. Provide only the German translation without any additional text:\n\n{text}"
-                    }]
-                }]
+            headers = {
+                "Authorization": f"Bearer {self.config['openai_api_key']}",
+                "Content-Type": "application/json"
             }
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as response:
+            payload = {
+                "model": "gpt-4.1-mini",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a professional translator specializing in cryptocurrency and financial news. Translate the following text to German. Keep technical terms and proper nouns in their original form when appropriate. Provide only the German translation without any additional text or explanations."
+                    },
+                    {
+                        "role": "user",
+                        "content": text
+                    }
+                ],
+                "temperature": 0.3,
+                "max_tokens": 500
+            }
+            
+            async with aiohttp.ClientSession( ) as session:
+                async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20 )) as response:
                     if response.status == 200:
                         result = await response.json()
-                        german_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
+                        german_text = result['choices'][0]['message']['content'].strip()
+                        logger.info(f"✅ Translated: {text[:30]}... → {german_text[:30]}...")
                         return german_text
                     else:
-                        logger.error(f"❌ Gemini translation failed: HTTP {response.status}")
+                        error_text = await response.text()
+                        logger.error(f"❌ OpenAI translation failed: HTTP {response.status} - {error_text}")
                         return "[Translation failed]"
         except Exception as e:
             logger.error(f"❌ Translation error: {e}")
@@ -289,8 +302,8 @@ class FFICryptoNewsBot:
                 'disable_web_page_preview': False
             }
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            async with aiohttp.ClientSession( ) as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10 )) as response:
                     if response.status == 200:
                         logger.info("📱 Sent to Telegram: " + message.split('\n')[0][:50] + "...")
                     else:
@@ -308,11 +321,11 @@ class FFICryptoNewsBot:
         
         for webhook_name, webhook_url in self.discord_webhooks:
             try:
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession( ) as session:
                     async with session.post(
                         webhook_url,
                         json=embed_data,
-                        timeout=aiohttp.ClientTimeout(total=10)
+                        timeout=aiohttp.ClientTimeout(total=10 )
                     ) as response:
                         if response.status in [200, 204]:
                             logger.info(f"📤 Sent to {webhook_name}: {title}...")
@@ -337,10 +350,10 @@ class FFICryptoNewsBot:
             try:
                 # Translate title and description to German
                 german_title = await self.translate_to_german(article['title'])
-                await asyncio.sleep(0.5)  # Rate limiting for Gemini API
+                await asyncio.sleep(0.5)
                 
                 german_desc = await self.translate_to_german(article['description'])
-                await asyncio.sleep(0.5)  # Rate limiting for Gemini API
+                await asyncio.sleep(0.5)
                 
                 # Format for both platforms
                 telegram_message = self.format_article_for_telegram(article, german_title, german_desc)
@@ -348,11 +361,11 @@ class FFICryptoNewsBot:
                 
                 # Send to ALL Discord webhooks
                 await self.send_to_all_discord_webhooks(discord_embed)
-                await asyncio.sleep(0.5)  # Rate limiting between platforms
+                await asyncio.sleep(0.5)
                 
                 # Send to Telegram
                 await self.send_to_telegram(telegram_message)
-                await asyncio.sleep(0.5)  # Rate limiting
+                await asyncio.sleep(0.5)
                 
                 # Mark as processed
                 self.processed_articles.add(article['link'])
@@ -368,12 +381,12 @@ class FFICryptoNewsBot:
         logger.info("=" * 80)
         logger.info(f"📡 Discord Servers: {len(self.discord_webhooks)}")
         logger.info(f"📱 Telegram: {'✅ Enabled' if self.config['telegram_token'] else '❌ Disabled'}")
-        logger.info(f"🌍 German Translation: {'✅ Enabled' if self.config['gemini_api_key'] else '❌ Disabled'}")
+        logger.info(f"🌍 German Translation: {'✅ Enabled (OpenAI)' if self.config['openai_api_key'] else '❌ Disabled'}")
         logger.info("=" * 80)
         
         try:
             # Fetch articles from all RSS feeds
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession( ) as session:
                 tasks = [self.fetch_rss_feed(session, name, url) for name, url in self.rss_feeds.items()]
                 results = await asyncio.gather(*tasks)
             
@@ -414,4 +427,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
