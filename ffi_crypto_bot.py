@@ -19,10 +19,7 @@ from typing import Dict, List, Optional, Tuple
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime )s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('ffi_crypto_bot.log')
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
