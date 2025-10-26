@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
-FFI Crypto News Bot - Enhanced Edition
-Advanced cryptocurrency news aggregator with Telegram scraping, RSS feeds, and German translation.
-
-Features:
-- Telegram channel scraping (Whale Alerts, Watcher Guru, Insider Paper)
-- RSS feeds (CoinDesk, The Block)
-- German translation via Google Gemini AI
-- Content filtering and deduplication
-- Dual-language delivery to Discord and Telegram
+FFI Crypto News Bot with German Translation - Multi-Discord Support
+Advanced cryptocurrency news aggregator with dual-language support
+Supports multiple Discord webhooks for different servers
 """
 
 import asyncio
@@ -17,641 +11,406 @@ import feedparser
 import json
 import logging
 import os
+import re
 import time
-import hashlib
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple
-from telethon import TelegramClient
-from telethon.tl.functions.messages import GetHistoryRequest
-from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from typing import Dict, List, Optional, Tuple
+import requests
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime )s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ffi_crypto_bot.log'),
-        logging.StreamHandler()
+        logging.StreamHandler(),
+        logging.FileHandler('ffi_crypto_bot.log')
     ]
 )
 logger = logging.getLogger(__name__)
 
-class FFICryptoBot:
-    """Enhanced FFI Crypto News Bot with Telegram scraping and German translation."""
+class FFICryptoNewsBot:
+    """Advanced crypto news bot with German translation and multi-Discord support."""
     
     def __init__(self):
-        """Initialize the bot with configuration."""
-        self.config = self.load_config()
-        self.session = None
-        self.telegram_client = None
-        self.processed_articles = set()
-        self.load_processed_articles()
-        
-        # Telegram channels to scrape
-        self.telegram_channels = {
-            'whale_alerts': '@whale_alert_io',
-            'watcher_guru': '@WatcherGuru',
-            'insider_paper': '@theinsiderpaper'
+        """Initialize the FFI Crypto News Bot with dual-language and multi-platform support."""
+        self.config = {
+            'telegram_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
+            'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID', ''),
+            'discord_webhook': os.getenv('DISCORD_WEBHOOK_URL', ''),
+            'discord_webhook_ffi': os.getenv('DISCORD_WEBHOOK_FFI', ''),
+            'gemini_api_key': os.getenv('GEMINI_API_KEY', ''),
+            'max_articles': int(os.getenv('MAX_ARTICLES_PER_RUN', '8')),
+            'hours_lookback': int(os.getenv('HOURS_LOOKBACK', '3'))
         }
         
-        # Selected RSS Feed Sources (CoinDesk & The Block only)
-        self.rss_sources = {
+        # Collect all Discord webhooks into a list
+        self.discord_webhooks = []
+        if self.config['discord_webhook']:
+            self.discord_webhooks.append(('Original Discord', self.config['discord_webhook']))
+        if self.config['discord_webhook_ffi']:
+            self.discord_webhooks.append(('FFI Discord', self.config['discord_webhook_ffi']))
+        
+        logger.info(f"🎯 Configured {len(self.discord_webhooks)} Discord webhook(s)")
+        
+        # RSS feeds for crypto news
+        self.rss_feeds = {
             'coindesk': 'https://www.coindesk.com/arc/outboundfeeds/rss/',
-            'theblock': 'https://www.theblock.co/api/rss'
+            'cointelegraph': 'https://cointelegraph.com/rss',
+            'theblock': 'https://www.theblock.co/rss.xml',
+            'decrypt': 'https://decrypt.co/feed',
+            'bitcoinist': 'https://bitcoinist.com/feed/',
+            'cryptoslate': 'https://cryptoslate.com/feed/'
         }
         
-        # Enhanced crypto keywords for intelligent filtering
+        # Crypto-related keywords for filtering
         self.crypto_keywords = [
-            'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'cryptocurrency',
-            'blockchain', 'defi', 'nft', 'altcoin', 'trading', 'whale',
-            'market', 'price', 'bull', 'bear', 'hodl', 'mining', 'staking',
-            'solana', 'cardano', 'polkadot', 'chainlink', 'uniswap', 'aave',
-            'binance', 'coinbase', 'kraken', 'doge', 'shib', 'matic',
-            'avalanche', 'terra', 'luna', 'atom', 'dot', 'ada', 'link', 'uni',
-            'web3', 'metaverse', 'dao', 'yield', 'liquidity', 'swap', 'dex',
-            'xrp', 'ripple', 'usdt', 'usdc', 'stablecoin', 'token', 'coin'
+            'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'cryptocurrency', 
+            'blockchain', 'defi', 'nft', 'altcoin', 'solana', 'cardano', 
+            'polkadot', 'chainlink', 'dogecoin', 'shiba', 'matic', 'polygon',
+            'binance', 'coinbase', 'trading', 'hodl', 'mining', 'staking',
+            'web3', 'metaverse', 'dao', 'yield', 'liquidity', 'dex', 'cefi'
         ]
         
-        # Market sentiment indicators
-        self.bullish_keywords = ['surge', 'rally', 'pump', 'moon', 'bullish', 'gains', 'rise', 'up', 'soar', 'rocket', 'breakout']
-        self.bearish_keywords = ['crash', 'dump', 'bearish', 'fall', 'drop', 'decline', 'down', 'plunge', 'tank', 'collapse']
+        # Load processed articles
+        self.processed_file = 'processed_articles.json'
+        self.processed_articles = self.load_processed_articles( )
         
-        # German sentiment translations
-        self.sentiment_german = {
-            '📈 Bullish': '📈 Bullisch',
-            '📉 Bearish': '📉 Bärisch',
-            '➡️ Neutral': '➡️ Neutral'
-        }
+        logger.info(f"📚 Loaded {len(self.processed_articles)} processed articles")
     
-    def load_config(self) -> Dict[str, str]:
-        """Load configuration from environment variables."""
-        return {
-            'discord_webhook': os.getenv('DISCORD_WEBHOOK_URL', ''),
-            'telegram_bot_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
-            'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID', ''),
-            'gemini_api_key': os.getenv('GEMINI_API_KEY', ''),
-            'telegram_api_id': os.getenv('TELEGRAM_API_ID', ''),
-            'telegram_api_hash': os.getenv('TELEGRAM_API_HASH', ''),
-            'telegram_phone': os.getenv('TELEGRAM_PHONE', ''),
-            'max_articles_per_run': int(os.getenv('MAX_ARTICLES_PER_RUN', '10')),
-            'hours_lookback': int(os.getenv('HOURS_LOOKBACK', '3')),
-            'enable_german': os.getenv('ENABLE_GERMAN_TRANSLATION', 'true').lower() == 'true',
-            'enable_telegram_scraping': os.getenv('ENABLE_TELEGRAM_SCRAPING', 'true').lower() == 'true'
-        }
-    
-    def load_processed_articles(self):
-        """Load previously processed article IDs to avoid duplicates."""
+    def load_processed_articles(self) -> set:
+        """Load previously processed article URLs."""
         try:
-            if os.path.exists('processed_articles.json'):
-                with open('processed_articles.json', 'r') as f:
+            if os.path.exists(self.processed_file):
+                with open(self.processed_file, 'r') as f:
                     data = json.load(f)
-                    self.processed_articles = set(data.get('articles', []))
-                    logger.info(f"📚 Loaded {len(self.processed_articles)} processed articles")
+                    return set(data.get('articles', []))
         except Exception as e:
-            logger.error(f"Error loading processed articles: {e}")
+            logger.warning(f"⚠️ Could not load processed articles: {e}")
+        return set()
     
     def save_processed_articles(self):
-        """Save processed article IDs to prevent reprocessing."""
+        """Save processed article URLs."""
         try:
-            # Keep only recent articles (last 7 days worth)
-            cutoff_time = time.time() - (7 * 24 * 3600)
-            recent_articles = {
-                article_id for article_id in self.processed_articles
-                if self.get_article_timestamp(article_id) > cutoff_time
+            # Keep only recent articles (last 100)
+            recent_articles = list(self.processed_articles)[-100:]
+            data = {
+                'articles': recent_articles,
+                'last_updated': datetime.now().isoformat()
             }
-            
-            with open('processed_articles.json', 'w') as f:
-                json.dump({'articles': list(recent_articles)}, f)
-            
-            self.processed_articles = recent_articles
+            with open(self.processed_file, 'w') as f:
+                json.dump(data, f, indent=2)
             logger.info(f"💾 Saved {len(recent_articles)} recent processed articles")
         except Exception as e:
-            logger.error(f"Error saving processed articles: {e}")
+            logger.error(f"❌ Could not save processed articles: {e}")
     
-    def get_article_timestamp(self, article_id: str) -> float:
-        """Extract timestamp from article ID."""
+    def is_crypto_related(self, title: str, description: str = '') -> bool:
+        """Check if article is cryptocurrency-related."""
+        text = f"{title} {description}".lower()
+        return any(keyword in text for keyword in self.crypto_keywords)
+    
+    def is_recent(self, published_time: str, hours_back: int = None) -> bool:
+        """Check if article was published recently."""
         try:
-            if '_' in article_id:
-                timestamp_str = article_id.split('_')[-1]
-                return float(timestamp_str)
-        except:
-            pass
-        return time.time()
+            if hours_back is None:
+                hours_back = self.config['hours_lookback']
+            
+            # Parse the published time
+            pub_time = datetime.fromtimestamp(time.mktime(time.strptime(published_time)))
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            return pub_time > cutoff_time
+        except Exception:
+            # If we can't parse the time, assume it's recent
+            return True
     
-    def generate_article_id(self, article: Dict[str, Any]) -> str:
-        """Generate unique ID for article."""
-        content = f"{article.get('title', '')}{article.get('link', '')}{article.get('source', '')}"
-        hash_id = hashlib.md5(content.encode()).hexdigest()[:12]
-        timestamp = str(int(time.time()))
-        return f"{hash_id}_{timestamp}"
-    
-    def is_crypto_relevant(self, text: str) -> bool:
-        """Check if text contains crypto-relevant keywords."""
-        text_lower = text.lower()
-        return any(keyword in text_lower for keyword in self.crypto_keywords)
-    
-    def analyze_sentiment(self, text: str) -> str:
-        """Advanced sentiment analysis based on market keywords."""
-        text_lower = text.lower()
-        
-        bullish_count = sum(1 for keyword in self.bullish_keywords if keyword in text_lower)
-        bearish_count = sum(1 for keyword in self.bearish_keywords if keyword in text_lower)
-        
-        if bullish_count > bearish_count:
-            return "📈 Bullish"
-        elif bearish_count > bullish_count:
-            return "📉 Bearish"
-        else:
-            return "➡️ Neutral"
-    
-    def extract_cryptocurrencies(self, text: str) -> List[str]:
-        """Extract mentioned cryptocurrencies from text."""
-        text_lower = text.lower()
-        found_cryptos = []
-        
-        crypto_map = {
-            'bitcoin': 'BTC', 'btc': 'BTC',
-            'ethereum': 'ETH', 'eth': 'ETH',
-            'solana': 'SOL', 'sol': 'SOL',
-            'cardano': 'ADA', 'ada': 'ADA',
-            'polkadot': 'DOT', 'dot': 'DOT',
-            'chainlink': 'LINK', 'link': 'LINK',
-            'dogecoin': 'DOGE', 'doge': 'DOGE',
-            'shiba': 'SHIB', 'shib': 'SHIB',
-            'polygon': 'MATIC', 'matic': 'MATIC',
-            'avalanche': 'AVAX', 'avax': 'AVAX',
-            'uniswap': 'UNI', 'uni': 'UNI',
-            'aave': 'AAVE',
-            'ripple': 'XRP', 'xrp': 'XRP'
-        }
-        
-        for keyword, symbol in crypto_map.items():
-            if keyword in text_lower and symbol not in found_cryptos:
-                found_cryptos.append(symbol)
-        
-        return found_cryptos[:3]  # Limit to 3 cryptos
-    
-    async def translate_to_german(self, text: str) -> str:
-        """Translate text to German using Google Gemini AI."""
-        if not self.config['enable_german']:
-            return ""
-        
-        if not self.config['gemini_api_key']:
-            logger.warning("🇩🇪 Gemini API key not configured, skipping German translation")
-            return "[German translation unavailable]"
-        
+    async def fetch_rss_feed(self, session: aiohttp.ClientSession, name: str, url: str ) -> List[Dict]:
+        """Fetch and parse RSS feed."""
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={self.config['gemini_api_key']}"
-            
-            payload = {
-                "contents": [{
-                    "parts": [{
-                        "text": f"Translate the following cryptocurrency news text to German. Keep cryptocurrency names, technical terms, and proper nouns in their original form. Provide only the German translation without any additional commentary:\n\n{text}"
-                    }]
-                }],
-                "generationConfig": {
-                    "temperature": 0.3,
-                    "maxOutputTokens": 500
-                }
-            }
-            
-            async with self.session.post(url, json=payload, timeout=20) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    german_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
-                    logger.info(f"🇩🇪 Translated text successfully")
-                    return german_text
-                else:
-                    error_text = await response.text()
-                    logger.error(f"❌ Gemini translation failed: HTTP {response.status}")
-                    return "[Translation failed]"
-        
-        except asyncio.TimeoutError:
-            logger.error("❌ Translation timeout")
-            return "[Translation timeout]"
-        except Exception as e:
-            logger.error(f"❌ Translation error: {e}")
-            return "[Translation error]"
-    
-    async def translate_article(self, article: Dict[str, Any]) -> Tuple[str, str]:
-        """Translate article title and description to German."""
-        if not self.config['enable_german']:
-            return "", ""
-        
-        try:
-            # Translate title
-            german_title = await self.translate_to_german(article['title'])
-            await asyncio.sleep(0.5)  # Rate limiting for Gemini API
-            
-            # Translate description (first 200 chars for efficiency)
-            description_short = article['description'][:200]
-            german_description = await self.translate_to_german(description_short)
-            await asyncio.sleep(0.5)  # Rate limiting
-            
-            return german_title, german_description
-        
-        except Exception as e:
-            logger.error(f"❌ Error translating article: {e}")
-            return "[Translation error]", "[Translation error]"
-    
-    async def scrape_telegram_channel(self, channel_name: str, channel_username: str) -> List[Dict[str, Any]]:
-        """Scrape messages from a Telegram channel."""
-        if not self.config['enable_telegram_scraping']:
-            return []
-        
-        try:
-            logger.info(f"📱 Scraping Telegram channel: {channel_name}")
-            
-            # Get messages from the last N hours
-            cutoff_time = datetime.now() - timedelta(hours=self.config['hours_lookback'])
-            
-            messages = await self.telegram_client.get_messages(
-                channel_username,
-                limit=50
-            )
-            
-            articles = []
-            for msg in messages:
-                try:
-                    # Skip if too old
-                    if msg.date < cutoff_time:
-                        continue
-                    
-                    # Skip if no text
-                    if not msg.message:
-                        continue
-                    
-                    # Extract text
-                    text = msg.message
-                    
-                    # Check if crypto-relevant
-                    if not self.is_crypto_relevant(text):
-                        continue
-                    
-                    # Create article object
-                    article = {
-                        'source': channel_name,
-                        'title': text[:100] + "..." if len(text) > 100 else text,
-                        'description': text[:300] + "..." if len(text) > 300 else text,
-                        'link': f"https://t.me/{channel_username.replace('@', '')}/{msg.id}",
-                        'published': msg.date.isoformat(),
-                        'author': channel_name,
-                        'tags': []
-                    }
-                    
-                    # Generate unique ID
-                    article_id = self.generate_article_id(article)
-                    
-                    # Check if already processed
-                    if article_id not in self.processed_articles:
-                        # Add AI analysis
-                        article['id'] = article_id
-                        article['sentiment'] = self.analyze_sentiment(text)
-                        article['cryptocurrencies'] = self.extract_cryptocurrencies(text)
-                        
-                        articles.append(article)
-                        self.processed_articles.add(article_id)
-                
-                except Exception as e:
-                    logger.error(f"Error processing Telegram message: {e}")
-                    continue
-            
-            logger.info(f"✅ Found {len(articles)} new crypto messages from {channel_name}")
-            return articles
-        
-        except FloodWaitError as e:
-            logger.error(f"⚠️ Telegram flood wait: {e.seconds} seconds")
-            return []
-        except Exception as e:
-            logger.error(f"❌ Error scraping Telegram channel {channel_name}: {e}")
-            return []
-    
-    async def fetch_rss_feed(self, source_name: str, url: str) -> List[Dict[str, Any]]:
-        """Fetch and parse RSS feed from a source."""
-        try:
-            logger.info(f"🔍 Fetching RSS feed from {source_name}")
-            
-            async with self.session.get(url, timeout=30) as response:
+            logger.info(f"🔍 Fetching RSS feed from {name}")
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10 )) as response:
                 if response.status == 200:
                     content = await response.text()
                     feed = feedparser.parse(content)
                     
                     articles = []
-                    cutoff_time = datetime.now() - timedelta(hours=self.config['hours_lookback'])
+                    for entry in feed.entries:
+                        # Check if article is new and crypto-related
+                        if (entry.link not in self.processed_articles and
+                            self.is_crypto_related(entry.title, getattr(entry, 'summary', '')) and
+                            self.is_recent(getattr(entry, 'published', ''))):
+                            
+                            articles.append({
+                                'title': entry.title,
+                                'link': entry.link,
+                                'description': getattr(entry, 'summary', '')[:300],
+                                'source': name,
+                                'published': getattr(entry, 'published', '')
+                            })
                     
-                    for entry in feed.entries[:15]:  # Limit entries per source
-                        try:
-                            # Parse publication date
-                            pub_date = None
-                            if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                                pub_date = datetime(*entry.published_parsed[:6])
-                            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                                pub_date = datetime(*entry.updated_parsed[:6])
-                            
-                            # Skip old articles
-                            if pub_date and pub_date < cutoff_time:
-                                continue
-                            
-                            # Extract article data
-                            article = {
-                                'source': source_name,
-                                'title': entry.get('title', ''),
-                                'link': entry.get('link', ''),
-                                'description': entry.get('description', ''),
-                                'published': pub_date.isoformat() if pub_date else datetime.now().isoformat(),
-                                'author': entry.get('author', ''),
-                                'tags': [tag.term for tag in entry.get('tags', [])]
-                            }
-                            
-                            # Check if crypto-relevant
-                            full_text = f"{article['title']} {article['description']}"
-                            if self.is_crypto_relevant(full_text):
-                                article_id = self.generate_article_id(article)
-                                if article_id not in self.processed_articles:
-                                    # Add AI analysis
-                                    article['id'] = article_id
-                                    article['sentiment'] = self.analyze_sentiment(full_text)
-                                    article['cryptocurrencies'] = self.extract_cryptocurrencies(full_text)
-                                    
-                                    articles.append(article)
-                                    self.processed_articles.add(article_id)
-                        
-                        except Exception as e:
-                            logger.error(f"Error processing entry from {source_name}: {e}")
-                            continue
-                    
-                    logger.info(f"✅ Found {len(articles)} new crypto articles from {source_name}")
+                    logger.info(f"✅ Found {len(articles)} new crypto articles from {name}")
                     return articles
-                
                 else:
-                    logger.warning(f"⚠️ Failed to fetch {source_name}: HTTP {response.status}")
-                    return []
-        
+                    logger.warning(f"⚠️ Failed to fetch {name}: HTTP {response.status}")
         except Exception as e:
-            logger.error(f"❌ Error fetching RSS from {source_name}: {e}")
-            return []
+            logger.error(f"❌ Error fetching {name}: {e}")
+        return []
     
-    def format_article_for_discord(self, article: Dict[str, Any], german_title: str = "", german_desc: str = "") -> Dict[str, Any]:
-        """Format article for Discord webhook with dual-language support."""
-        title = article['title'][:100] + "..." if len(article['title']) > 100 else article['title']
-        description = article['description'][:200] + "..." if len(article['description']) > 200 else article['description']
-        
-        # Get color based on sentiment
-        color_map = {
-            '📈 Bullish': 0x00ff00,  # Green
-            '📉 Bearish': 0xff0000,  # Red
-            '➡️ Neutral': 0xffff00   # Yellow
-        }
-        color = color_map.get(article.get('sentiment', '➡️ Neutral'), 0xffff00)
-        
-        # Build description with both languages
-        full_description = f"**🇬🇧 English:**\n{description}\n"
-        
-        if german_desc and german_desc not in ["[Translation error]", "[Translation timeout]", "[Translation failed]"]:
-            full_description += f"\n**🇩🇪 Deutsch:**\n{german_desc}"
-        
-        # Create embed
-        embed = {
-            'title': title,
-            'url': article['link'],
-            'description': full_description,
-            'color': color,
-            'timestamp': article['published'],
-            'footer': {'text': f"FFI Crypto Bot • {article['source'].title()}"},
-            'fields': [
-                {'name': '📊 Sentiment', 'value': article.get('sentiment', 'N/A'), 'inline': True}
-            ]
-        }
-        
-        # Add German title if available
-        if german_title and german_title not in ["[Translation error]", "[Translation timeout]", "[Translation failed]"]:
-            embed['fields'].insert(0, {
-                'name': '🇩🇪 German Title',
-                'value': german_title[:100] + "..." if len(german_title) > 100 else german_title,
-                'inline': False
-            })
-        
-        # Add cryptocurrencies if found
-        if article.get('cryptocurrencies'):
-            embed['fields'].append({
-                'name': '💰 Cryptocurrencies',
-                'value': ', '.join(article['cryptocurrencies']),
-                'inline': True
-            })
-        
-        return {'embeds': [embed]}
+    async def translate_to_german(self, text: str) -> str:
+        """Translate text to German using Gemini AI."""
+        try:
+            if not self.config['gemini_api_key']:
+                logger.warning("💬 Gemini API key not configured, skipping German translation")
+                return "[German translation unavailable]"
+            
+            # Use Gemini API for translation
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.config['gemini_api_key']}"
+            
+            payload = {
+                "contents": [{
+                    "parts": [{
+                        "text": f"Translate the following cryptocurrency news text to German. Keep technical terms and proper nouns in their original form when appropriate. Provide only the German translation without any additional text:\n\n{text}"
+                    }]
+                }]
+            }
+            
+            async with aiohttp.ClientSession( ) as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15 )) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        german_text = result['candidates'][0]['content']['parts'][0]['text'].strip()
+                        return german_text
+                    else:
+                        logger.error(f"❌ Gemini translation failed: HTTP {response.status}")
+                        return "[Translation failed]"
+        except Exception as e:
+            logger.error(f"❌ Translation error: {e}")
+            return "[Translation error]"
     
-    def format_article_for_telegram(self, article: Dict[str, Any], german_title: str = "", german_desc: str = "") -> str:
+    def analyze_sentiment(self, title: str, description: str) -> Tuple[str, str]:
+        """Analyze sentiment of the article."""
+        text = f"{title} {description}".lower()
+        
+        # Positive indicators
+        positive_words = ['surge', 'rally', 'bull', 'gain', 'rise', 'up', 'high', 'moon', 
+                         'breakthrough', 'adoption', 'partnership', 'launch', 'upgrade']
+        
+        # Negative indicators  
+        negative_words = ['crash', 'dump', 'bear', 'fall', 'drop', 'down', 'low', 'hack',
+                         'ban', 'regulation', 'concern', 'warning', 'risk', 'decline']
+        
+        positive_count = sum(1 for word in positive_words if word in text)
+        negative_count = sum(1 for word in negative_words if word in text)
+        
+        if positive_count > negative_count:
+            return '📈 Bullish', '🟢'
+        elif negative_count > positive_count:
+            return '📉 Bearish', '🔴'
+        else:
+            return '➡️ Neutral', '🟡'
+    
+    def format_article_for_telegram(self, article: Dict, german_title: str = None, german_desc: str = None) -> str:
         """Format article for Telegram with dual-language support."""
-        title = article['title']
-        source = article['source'].title()
-        link = article['link']
-        sentiment = article.get('sentiment', '➡️ Neutral')
-        sentiment_de = self.sentiment_german.get(sentiment, '➡️ Neutral')
+        sentiment, _ = self.analyze_sentiment(article['title'], article['description'])
         
-        # Build message with English
-        message = f"🚀 *{title}*\n\n"
-        message += f"📊 {sentiment}\n"
+        # Format English version
+        message = f"🚀 **{article['title']}**\n\n"
+        message += f"📰 {article['description']}\n\n"
         
-        # Add German translation
-        if german_title and german_title not in ["[Translation error]", "[Translation timeout]", "[Translation failed]"]:
-            message += f"\n🇩🇪 *{german_title}*\n\n"
-            if german_desc and german_desc not in ["[Translation error]", "[Translation timeout]", "[Translation failed]"]:
-                message += f"📰 {german_desc}\n"
-            message += f"📊 {sentiment_de}\n"
+        # Add German translation if available
+        if german_title and german_desc and "[" not in german_title:
+            message += f"🇩🇪 **{german_title}**\n\n"
+            message += f"📰 {german_desc}\n\n"
         
-        # Add cryptocurrencies if found
-        if article.get('cryptocurrencies'):
-            message += f"\n💰 *Coins:* {', '.join(article['cryptocurrencies'])}\n"
-        
-        message += f"\n📰 *Source:* {source}\n"
-        message += f"🔗 [Read More]({link})\n"
-        message += f"\n_Powered by FFI Crypto Bot_ 🤖"
+        message += f"📊 Sentiment: {sentiment}\n"
+        message += f"📍 Source: {article['source'].title()}\n"
+        message += f"🔗 [Read More]({article['link']})"
         
         return message
     
-    async def send_to_discord(self, articles: List[Dict[str, Any]]):
-        """Send articles to Discord webhook."""
-        if not self.config['discord_webhook']:
-            logger.info("💬 Discord webhook not configured, skipping Discord delivery")
-            return
+    def format_article_for_discord(self, article: Dict, german_title: str = None, german_desc: str = None) -> Dict:
+        """Format article for Discord webhook with dual-language support."""
+        sentiment, color_indicator = self.analyze_sentiment(article['title'], article['description'])
         
-        try:
-            for article in articles:
-                # Translate if enabled
-                german_title, german_desc = "", ""
-                if self.config['enable_german']:
-                    german_title, german_desc = await self.translate_article(article)
-                
-                payload = self.format_article_for_discord(article, german_title, german_desc)
-                
-                async with self.session.post(
-                    self.config['discord_webhook'],
-                    json=payload,
-                    timeout=30
-                ) as response:
-                    if response.status == 204:
-                        logger.info(f"📤 Sent to Discord: {article['title'][:50]}...")
-                    else:
-                        logger.error(f"❌ Discord webhook failed: HTTP {response.status}")
-                
-                # Rate limiting
-                await asyncio.sleep(1)
+        # Color mapping for Discord embeds
+        color_map = {'🟢': 0x00ff00, '🔴': 0xff0000, '🟡': 0xffff00}
+        embed_color = color_map.get(color_indicator, 0x0099ff)
         
-        except Exception as e:
-            logger.error(f"❌ Error sending to Discord: {e}")
+        # Create description with both languages
+        description = f"**English:** {article['description']}\n\n"
+        if german_title and german_desc and "[" not in german_title:
+            description += f"**🇩🇪 Deutsch:** {german_desc}"
+        
+        embed = {
+            "embeds": [{
+                "title": article['title'],
+                "description": description,
+                "url": article['link'],
+                "color": embed_color,
+                "fields": [
+                    {
+                        "name": "📊 Sentiment",
+                        "value": sentiment,
+                        "inline": True
+                    },
+                    {
+                        "name": "📍 Source", 
+                        "value": article['source'].title(),
+                        "inline": True
+                    }
+                ],
+                "footer": {
+                    "text": f"FFI Crypto News Bot • {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                },
+                "timestamp": datetime.now().isoformat()
+            }]
+        }
+        
+        # Add German title as field if available
+        if german_title and "[" not in german_title:
+            embed["embeds"][0]["fields"].insert(0, {
+                "name": "🇩🇪 German Title",
+                "value": german_title,
+                "inline": False
+            })
+        
+        return embed
     
-    async def send_to_telegram(self, articles: List[Dict[str, Any]]):
-        """Send articles to Telegram."""
-        if not self.config['telegram_bot_token'] or not self.config['telegram_chat_id']:
-            logger.warning("⚠️ Telegram configuration incomplete")
+    async def send_to_telegram(self, message: str):
+        """Send message to Telegram."""
+        if not self.config['telegram_token'] or not self.config['telegram_chat_id']:
+            logger.info("💬 Telegram not configured, skipping Telegram delivery")
             return
         
         try:
-            url = f"https://api.telegram.org/bot{self.config['telegram_bot_token']}/sendMessage"
+            url = f"https://api.telegram.org/bot{self.config['telegram_token']}/sendMessage"
+            payload = {
+                'chat_id': self.config['telegram_chat_id'],
+                'text': message,
+                'parse_mode': 'Markdown',
+                'disable_web_page_preview': False
+            }
             
-            for article in articles:
-                # Translate if enabled
-                german_title, german_desc = "", ""
-                if self.config['enable_german']:
-                    german_title, german_desc = await self.translate_article(article)
-                
-                message = self.format_article_for_telegram(article, german_title, german_desc)
-                
-                payload = {
-                    'chat_id': self.config['telegram_chat_id'],
-                    'text': message,
-                    'parse_mode': 'Markdown',
-                    'disable_web_page_preview': False
-                }
-                
-                async with self.session.post(url, json=payload, timeout=30) as response:
+            async with aiohttp.ClientSession( ) as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10 )) as response:
                     if response.status == 200:
-                        logger.info(f"📱 Sent to Telegram: {article['title'][:50]}...")
+                        logger.info("📱 Sent to Telegram: " + message.split('\n')[0][:50] + "...")
                     else:
-                        error_text = await response.text()
-                        logger.error(f"❌ Telegram API failed: HTTP {response.status}")
-                
-                # Rate limiting
-                await asyncio.sleep(1)
-        
+                        logger.error(f"❌ Telegram failed: HTTP {response.status}")
         except Exception as e:
-            logger.error(f"❌ Error sending to Telegram: {e}")
+            logger.error(f"❌ Telegram error: {e}")
     
-    async def initialize_telegram_client(self):
-        """Initialize Telegram client for scraping."""
-        if not self.config['enable_telegram_scraping']:
-            logger.info("📱 Telegram scraping disabled")
-            return False
+    async def send_to_all_discord_webhooks(self, embed_data: Dict):
+        """Send embed to ALL configured Discord webhooks."""
+        if not self.discord_webhooks:
+            logger.info("💬 No Discord webhooks configured, skipping Discord delivery")
+            return
         
-        if not self.config['telegram_api_id'] or not self.config['telegram_api_hash']:
-            logger.warning("⚠️ Telegram API credentials not configured, skipping Telegram scraping")
-            return False
+        title = embed_data['embeds'][0]['title'][:50]
         
-        try:
-            self.telegram_client = TelegramClient(
-                'ffi_bot_session',
-                int(self.config['telegram_api_id']),
-                self.config['telegram_api_hash']
-            )
+        for webhook_name, webhook_url in self.discord_webhooks:
+            try:
+                async with aiohttp.ClientSession( ) as session:
+                    async with session.post(
+                        webhook_url,
+                        json=embed_data,
+                        timeout=aiohttp.ClientTimeout(total=10 )
+                    ) as response:
+                        if response.status in [200, 204]:
+                            logger.info(f"📤 Sent to {webhook_name}: {title}...")
+                        else:
+                            logger.error(f"❌ {webhook_name} failed: HTTP {response.status}")
+            except Exception as e:
+                logger.error(f"❌ {webhook_name} error: {e}")
             
-            await self.telegram_client.start()
-            logger.info("✅ Telegram client initialized successfully")
-            return True
+            # Small delay between webhooks to avoid rate limiting
+            await asyncio.sleep(0.3)
+    
+    async def process_articles(self, articles: List[Dict]):
+        """Process articles with German translation and send to all platforms."""
+        if not articles:
+            logger.info("📭 No new articles to process")
+            return
         
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Telegram client: {e}")
-            return False
+        logger.info(f"⚡ Processing {len(articles)} articles with German translation")
+        logger.info(f"🎯 Will deliver to: {len(self.discord_webhooks)} Discord server(s) + Telegram")
+        
+        for article in articles:
+            try:
+                # Translate title and description to German
+                german_title = await self.translate_to_german(article['title'])
+                await asyncio.sleep(0.5)
+                
+                german_desc = await self.translate_to_german(article['description'])
+                await asyncio.sleep(0.5)
+                
+                # Format for both platforms
+                telegram_message = self.format_article_for_telegram(article, german_title, german_desc)
+                discord_embed = self.format_article_for_discord(article, german_title, german_desc)
+                
+                # Send to ALL Discord webhooks
+                await self.send_to_all_discord_webhooks(discord_embed)
+                await asyncio.sleep(0.5)
+                
+                # Send to Telegram
+                await self.send_to_telegram(telegram_message)
+                await asyncio.sleep(0.5)
+                
+                # Mark as processed
+                self.processed_articles.add(article['link'])
+                
+            except Exception as e:
+                logger.error(f"❌ Error processing article {article['title']}: {e}")
     
     async def run(self):
-        """Main execution function - The heart of FFI Crypto Bot."""
-        logger.info("🚀 Starting Enhanced FFI Crypto News Bot with Telegram Scraping & German Translation!")
-        
-        # Create aiohttp session
-        connector = aiohttp.TCPConnector(limit=20, limit_per_host=5)
-        self.session = aiohttp.ClientSession(connector=connector)
+        """Main execution function."""
+        logger.info("=" * 80)
+        logger.info("🚀 FFI CRYPTO NEWS BOT - MULTI-DISCORD EDITION")
+        logger.info("   Dual-Language (English + German) • Multi-Platform Delivery")
+        logger.info("=" * 80)
+        logger.info(f"📡 Discord Servers: {len(self.discord_webhooks)}")
+        logger.info(f"📱 Telegram: {'✅ Enabled' if self.config['telegram_token'] else '❌ Disabled'}")
+        logger.info(f"🌍 German Translation: {'✅ Enabled' if self.config['gemini_api_key'] else '❌ Disabled'}")
+        logger.info("=" * 80)
         
         try:
-            all_articles = []
+            # Fetch articles from all RSS feeds
+            async with aiohttp.ClientSession( ) as session:
+                tasks = [self.fetch_rss_feed(session, name, url) for name, url in self.rss_feeds.items()]
+                results = await asyncio.gather(*tasks)
             
-            # Initialize Telegram client if enabled
-            telegram_enabled = await self.initialize_telegram_client()
+            # Flatten and sort articles
+            all_articles = [article for sublist in results for article in sublist]
+            all_articles.sort(key=lambda x: x.get('published', ''), reverse=True)
             
-            # Scrape Telegram channels
-            if telegram_enabled:
-                for channel_name, channel_username in self.telegram_channels.items():
-                    try:
-                        articles = await self.scrape_telegram_channel(channel_name, channel_username)
-                        all_articles.extend(articles)
-                        await asyncio.sleep(2)  # Rate limiting between channels
-                    except Exception as e:
-                        logger.error(f"❌ Error scraping {channel_name}: {e}")
+            # Limit to max articles
+            articles_to_process = all_articles[:self.config['max_articles']]
             
-            # Fetch RSS feeds
-            tasks = [
-                self.fetch_rss_feed(source_name, url)
-                for source_name, url in self.rss_sources.items()
-            ]
+            logger.info(f"📊 Found {len(all_articles)} total new articles")
+            logger.info(f"📝 Processing top {len(articles_to_process)} articles")
             
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for result in results:
-                if isinstance(result, list):
-                    all_articles.extend(result)
-                elif isinstance(result, Exception):
-                    logger.error(f"❌ RSS fetch error: {result}")
-            
-            if not all_articles:
-                logger.info("📭 No new crypto articles found")
-                return
-            
-            # Sort by publication date (newest first)
-            all_articles.sort(key=lambda x: x['published'], reverse=True)
-            
-            # Limit articles per run
-            articles_to_process = all_articles[:self.config['max_articles_per_run']]
-            
-            logger.info(f"⚡ Processing {len(articles_to_process)} articles with German translation")
-            
-            # Send to platforms simultaneously
-            await asyncio.gather(
-                self.send_to_discord(articles_to_process),
-                self.send_to_telegram(articles_to_process)
-            )
+            # Process and send articles
+            await self.process_articles(articles_to_process)
             
             # Save processed articles
             self.save_processed_articles()
             
-            logger.info(f"✅ Successfully processed {len(articles_to_process)} articles")
+            logger.info("=" * 80)
+            logger.info("✅ FFI CRYPTO NEWS BOT COMPLETED SUCCESSFULLY")
+            logger.info("=" * 80)
             
-            # Log summary
-            sources_summary = {}
-            sentiment_summary = {}
-            
-            for article in articles_to_process:
-                source = article['source']
-                sentiment = article.get('sentiment', '➡️ Neutral')
-                
-                sources_summary[source] = sources_summary.get(source, 0) + 1
-                sentiment_summary[sentiment] = sentiment_summary.get(sentiment, 0) + 1
-            
-            logger.info(f"📊 Articles by source: {sources_summary}")
-            logger.info(f"📈 Sentiment breakdown: {sentiment_summary}")
-            logger.info("🎉 Enhanced FFI Crypto Bot execution completed successfully!")
-        
         except Exception as e:
-            logger.error(f"❌ Error in main execution: {e}")
-        
-        finally:
-            if self.telegram_client:
-                await self.telegram_client.disconnect()
-            await self.session.close()
+            logger.error(f"❌ Critical error in main execution: {e}")
+            raise
 
-async def main():
-    """Entry point for Enhanced FFI Crypto News Bot."""
-    bot = FFICryptoBot()
-    await bot.run()
+def main():
+    """Entry point for the bot."""
+    try:
+        bot = FFICryptoNewsBot()
+        asyncio.run(bot.run())
+    except KeyboardInterrupt:
+        logger.info("⚠️ Bot stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+        raise
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    main()
