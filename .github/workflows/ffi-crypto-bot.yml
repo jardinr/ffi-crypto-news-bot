@@ -26,7 +26,6 @@ jobs:
       - name: Run FFI Crypto News Bot
         env:   
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
- 
           DISCORD_WEBHOOK_FFI: ${{ secrets.DISCORD_WEBHOOK_FFI }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
