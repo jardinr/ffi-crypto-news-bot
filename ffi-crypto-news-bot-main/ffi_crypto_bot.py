@@ -357,21 +357,36 @@ class FFICryptoNewsBot:
         """Format article for Telegram with Module 8 significance indicators."""
         stars = '⭐' * article['credibility']
         
-        message = f"{article['classification_emoji']} **{article['classification'].upper()}**\n\n"
-        message += f"**{article['title']}**\n\n"
-        message += f"📊 Significance: {article['total_score']}/5\n"
-        message += f"⭐ Credibility: {stars} ({article['credibility']}/5)\n"
-        message += f"📈 Market Impact: {article['market_impact']}/5\n"
-        message += f"🎯 Relevance: {article['relevance']}/5\n"
-        message += f"💭 Sentiment: {article['sentiment_label']} ({article['sentiment_score']:+d})\n"
-        message += f"⏰ Time Impact: {article['time_impact']}/5\n\n"
+        # Translate classification to German
+        classification_de = {
+            'High Impact': 'HOHE BEDEUTUNG',
+            'Medium Impact': 'MITTLERE BEDEUTUNG',
+            'Low Impact': 'GERINGE BEDEUTUNG'
+        }.get(article['classification'], article['classification'].upper())
         
-        message += f"**English:**\n{article['description']}\n\n"
+        message = f"{article['classification_emoji']} **{classification_de}**\n\n"
+        # Use German title if available, otherwise English
+        display_title = german_title if (german_title and "[" not in german_title) else article['title']
+        display_desc = german_desc if (german_desc and "[" not in german_desc) else article['description']
         
-        if german_title and german_desc and "[" not in german_title:
-            message += f"**🇩🇪 Deutsch:**\n{german_desc}\n\n"
+        message += f"**{display_title}**\n\n"
+        # Translate sentiment to German
+        sentiment_de = {
+            'Bullish': 'Bullisch',
+            'Bearish': 'Bärisch',
+            'Neutral': 'Neutral'
+        }.get(article['sentiment_label'], article['sentiment_label'])
         
-        message += f"Source: {article['source']} | [Read More]({article['link']})"
+        message += f"📊 Bedeutung: {article['total_score']}/5\n"
+        message += f"⭐ Glaubwürdigkeit: {stars} ({article['credibility']}/5)\n"
+        message += f"📈 Marktauswirkung: {article['market_impact']}/5\n"
+        message += f"🎯 Relevanz: {article['relevance']}/5\n"
+        message += f"💭 Stimmung: {sentiment_de} ({article['sentiment_score']:+d})\n"
+        message += f"⏰ Zeitliche Dringlichkeit: {article['time_impact']}/5\n\n"
+        
+        message += f"{display_desc}\n\n"
+        
+        message += f"Quelle: {article['source']} | [Mehr lesen]({article['link']})"
         
         return message
     
@@ -382,21 +397,37 @@ class FFICryptoNewsBot:
         
         stars = '⭐' * article['credibility']
         
-        title = f"{article['classification_emoji']} {article['title']}"
+        # Use German title if available, otherwise English
+        display_title = german_title if (german_title and "[" not in german_title) else article['title']
+        title = f"{article['classification_emoji']} {display_title}"
         
-        description = f"**📊 Significance: {article['classification_emoji']} {article['classification'].upper()} (Score: {article['total_score']}/5)**\n"
-        description += f"**⭐ Source Credibility:** {stars} ({article['credibility']}/5)\n"
-        description += f"**📈 Market Impact:** {article['market_impact']}/5 | **🎯 Relevance:** {article['relevance']}/5 | **⏰ Urgency:** {article['time_impact']}/5\n"
-        description += f"**💭 Sentiment:** {article['sentiment_label']} ({article['sentiment_score']:+d})\n\n"
+        # Use German title if available, otherwise English
+        display_title = german_title if (german_title and "[" not in german_title) else article['title']
+        display_desc = german_desc if (german_desc and "[" not in german_desc) else article['description']
         
-        description += f"**English:**\n{article['description']}\n\n"
+        # Translate classification and sentiment to German
+        classification_de = {
+            'High Impact': 'HOHE BEDEUTUNG',
+            'Medium Impact': 'MITTLERE BEDEUTUNG',
+            'Low Impact': 'GERINGE BEDEUTUNG'
+        }.get(article['classification'], article['classification'].upper())
         
-        if german_title and german_desc and "[" not in german_title:
-            description += f"**🇩🇪 Deutsch:**\n{german_desc}\n\n"
+        sentiment_de = {
+            'Bullish': 'Bullisch',
+            'Bearish': 'Bärisch',
+            'Neutral': 'Neutral'
+        }.get(article['sentiment_label'], article['sentiment_label'])
         
-        description += f"**Classification:** {article['classification']}\n"
-        description += f"**Source:** {article['source']}\n"
-        description += f"**Sentiment:** {article['sentiment_label']}"
+        description = f"**📊 Bedeutung: {article['classification_emoji']} {classification_de} (Punktzahl: {article['total_score']}/5)**\n"
+        description += f"**⭐ Quellenglaubwürdigkeit:** {stars} ({article['credibility']}/5)\n"
+        description += f"**📈 Marktauswirkung:** {article['market_impact']}/5 | **🎯 Relevanz:** {article['relevance']}/5 | **⏰ Dringlichkeit:** {article['time_impact']}/5\n"
+        description += f"**💭 Stimmung:** {sentiment_de} ({article['sentiment_score']:+d})\n\n"
+        
+        description += f"{display_desc}\n\n"
+        
+        description += f"**Klassifizierung:** {classification_de.title()}\n"
+        description += f"**Quelle:** {article['source']}\n"
+        description += f"**Stimmung:** {sentiment_de}"
         
         embed = {
             "embeds": [{
