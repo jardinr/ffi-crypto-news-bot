@@ -25,7 +25,7 @@ jobs:
           pip install -r requirements.txt
       
       - name: Run FFI Crypto News Bot
-        env:   
+        env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DISCORD_WEBHOOK_FFI: ${{ secrets.DISCORD_WEBHOOK_FFI }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -37,6 +37,4 @@ jobs:
           TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
         run: |
           echo "🚀 Starting FFI Crypto News Bot..."
-         python ffi-crypto-news-bot-main/ffi_crypto_bot.py
-
-
+          python ffi-crypto-news-bot-main/ffi_crypto_bot.py
