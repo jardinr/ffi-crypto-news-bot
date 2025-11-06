@@ -38,3 +38,4 @@ jobs:
         run: |
           echo "🚀 Starting FFI Crypto News Bot..."
           python ffi-crypto-news-bot-main/ffi_crypto_bot.py
+
