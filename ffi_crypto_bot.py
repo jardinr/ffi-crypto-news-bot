@@ -1,357 +1,424 @@
 #!/usr/bin/env python3
 """
-FFI Crypto News Bot - Module 8 Enhanced Edition with Notion Portfolio Integration
-Main orchestrator with integrated portfolio tracking
+FFI Crypto News Bot - Financial Freedom Institute
+Advanced cryptocurrency news aggregator with AI-powered analysis.
+
+Built to replace unreliable n8n workflows with a fast, reliable Python solution.
 """
 
 import asyncio
-import sys
+import aiohttp
+import feedparser
+import json
+import logging
 import os
-import csv
-import re
-from datetime import datetime
-from typing import Dict, List, Optional
+import time
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any
+import hashlib
 
-# Import configuration
-from config import Config
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('ffi_crypto_bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
-# Import utilities
-from utils.openai_client import OpenAIClient
-from utils.discord_poster import DiscordPoster
-from utils.telegram_poster import TelegramPoster
-
-# Import modules
-from modules.news_analyzer import NewsAnalyzer
-from modules.news_summarizer import NewsSummarizer
-from modules.etf_tracker import ETFTracker
-
-
-class PortfolioTracker:
-    """Simplified portfolio tracker with Notion integration."""
+class FFICryptoBot:
+    """FFI Crypto News Bot - Superior alternative to n8n workflows."""
     
-    def __init__(self, config):
-        """Initialize portfolio tracker."""
-        self.config = config
-        self.portfolio_path = 'notion_portfolio.csv'  # In root directory
+    def __init__(self):
+        """Initialize the bot with configuration."""
+        self.config = self.load_config()
+        self.session = None
+        self.processed_articles = set()
+        self.load_processed_articles()
         
-    def _parse_price(self, price_str: str) -> Optional[float]:
-        """Parse price string to float."""
-        if not price_str or price_str.strip() == '' or price_str == '-':
-            return None
+        # Premium RSS Feed Sources
+        self.rss_sources = {
+            'coindesk': 'https://www.coindesk.com/arc/outboundfeeds/rss/',
+            'cointelegraph': 'https://cointelegraph.com/rss',
+            'theblock': 'https://www.theblock.co/api/rss',
+            'decrypt': 'https://decrypt.co/feed',
+            'bitcoinist': 'https://bitcoinist.com/feed/',
+            'cryptoslate': 'https://cryptoslate.com/feed/',
+            'newsbtc': 'https://www.newsbtc.com/feed/',
+            'coinjournal': 'https://coinjournal.net/feed/',
+            'cryptonews': 'https://cryptonews.com/news/feed/'
+        }
         
-        cleaned = price_str.replace('$', '').replace(' ', '').replace(',', '.')
-        match = re.search(r'[\d.]+', cleaned)
-        if match:
-            try:
-                return float(match.group())
-            except ValueError:
-                return None
-        return None
+        # Enhanced crypto keywords for intelligent filtering
+        self.crypto_keywords = [
+            'bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'cryptocurrency',
+            'blockchain', 'defi', 'nft', 'altcoin', 'trading', 'whale',
+            'market', 'price', 'bull', 'bear', 'hodl', 'mining', 'staking',
+            'solana', 'cardano', 'polkadot', 'chainlink', 'uniswap', 'aave',
+            'binance', 'coinbase', 'kraken', 'doge', 'shib', 'matic',
+            'avalanche', 'terra', 'luna', 'atom', 'dot', 'ada', 'link', 'uni',
+            'web3', 'metaverse', 'dao', 'yield', 'liquidity', 'swap', 'dex'
+        ]
+        
+        # Market sentiment indicators
+        self.bullish_keywords = ['surge', 'rally', 'pump', 'moon', 'bullish', 'gains', 'rise', 'up', 'soar', 'rocket']
+        self.bearish_keywords = ['crash', 'dump', 'bearish', 'fall', 'drop', 'decline', 'down', 'plunge', 'tank']
     
-    def _parse_exit_targets(self, exit_str: str) -> List[Dict[str, float]]:
-        """Parse exit target string."""
-        if not exit_str or exit_str.strip() == '' or exit_str == '-':
+    def load_config(self) -> Dict[str, str]:
+        """Load configuration from environment variables."""
+        return {
+            'discord_webhook': os.getenv('DISCORD_WEBHOOK_URL', ''),
+            'telegram_bot_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
+            'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID', ''),
+            'max_articles_per_run': int(os.getenv('MAX_ARTICLES_PER_RUN', '8')),
+            'hours_lookback': int(os.getenv('HOURS_LOOKBACK', '3'))
+        }
+    
+    def load_processed_articles(self):
+        """Load previously processed article IDs to avoid duplicates."""
+        try:
+            if os.path.exists('processed_articles.json'):
+                with open('processed_articles.json', 'r') as f:
+                    data = json.load(f)
+                    self.processed_articles = set(data.get('articles', []))
+                    logger.info(f"📚 Loaded {len(self.processed_articles)} processed articles")
+        except Exception as e:
+            logger.error(f"Error loading processed articles: {e}")
+    
+    def save_processed_articles(self):
+        """Save processed article IDs to prevent reprocessing."""
+        try:
+            # Keep only recent articles (last 7 days worth)
+            cutoff_time = time.time() - (7 * 24 * 3600)
+            recent_articles = {
+                article_id for article_id in self.processed_articles
+                if self.get_article_timestamp(article_id) > cutoff_time
+            }
+            
+            with open('processed_articles.json', 'w') as f:
+                json.dump({'articles': list(recent_articles)}, f)
+            
+            self.processed_articles = recent_articles
+            logger.info(f"💾 Saved {len(recent_articles)} recent processed articles")
+        except Exception as e:
+            logger.error(f"Error saving processed articles: {e}")
+    
+    def get_article_timestamp(self, article_id: str) -> float:
+        """Extract timestamp from article ID."""
+        try:
+            if '_' in article_id:
+                timestamp_str = article_id.split('_')[-1]
+                return float(timestamp_str)
+        except:
+            pass
+        return time.time()
+    
+    def generate_article_id(self, article: Dict[str, Any]) -> str:
+        """Generate unique ID for article."""
+        content = f"{article.get('title', '')}{article.get('link', '')}"
+        hash_id = hashlib.md5(content.encode()).hexdigest()[:12]
+        timestamp = str(int(time.time()))
+        return f"{hash_id}_{timestamp}"
+    
+    def is_crypto_relevant(self, text: str) -> bool:
+        """Check if text contains crypto-relevant keywords."""
+        text_lower = text.lower()
+        return any(keyword in text_lower for keyword in self.crypto_keywords)
+    
+    def analyze_sentiment(self, text: str) -> str:
+        """Advanced sentiment analysis based on market keywords."""
+        text_lower = text.lower()
+        
+        bullish_count = sum(1 for keyword in self.bullish_keywords if keyword in text_lower)
+        bearish_count = sum(1 for keyword in self.bearish_keywords if keyword in text_lower)
+        
+        if bullish_count > bearish_count:
+            return "📈 Bullish"
+        elif bearish_count > bullish_count:
+            return "📉 Bearish"
+        else:
+            return "➡️ Neutral"
+    
+    def extract_cryptocurrencies(self, text: str) -> List[str]:
+        """Extract mentioned cryptocurrencies from text."""
+        text_lower = text.lower()
+        found_cryptos = []
+        
+        crypto_map = {
+            'bitcoin': 'BTC', 'btc': 'BTC',
+            'ethereum': 'ETH', 'eth': 'ETH',
+            'solana': 'SOL', 'sol': 'SOL',
+            'cardano': 'ADA', 'ada': 'ADA',
+            'polkadot': 'DOT', 'dot': 'DOT',
+            'chainlink': 'LINK', 'link': 'LINK',
+            'dogecoin': 'DOGE', 'doge': 'DOGE',
+            'shiba': 'SHIB', 'shib': 'SHIB',
+            'polygon': 'MATIC', 'matic': 'MATIC',
+            'avalanche': 'AVAX', 'avax': 'AVAX',
+            'uniswap': 'UNI', 'uni': 'UNI',
+            'aave': 'AAVE'
+        }
+        
+        for keyword, symbol in crypto_map.items():
+            if keyword in text_lower and symbol not in found_cryptos:
+                found_cryptos.append(symbol)
+        
+        return found_cryptos[:3]  # Limit to 3 cryptos
+    
+    async def fetch_rss_feed(self, source_name: str, url: str) -> List[Dict[str, Any]]:
+        """Fetch and parse RSS feed from a source."""
+        try:
+            logger.info(f"🔍 Fetching RSS feed from {source_name}")
+            
+            async with self.session.get(url, timeout=30) as response:
+                if response.status == 200:
+                    content = await response.text()
+                    feed = feedparser.parse(content)
+                    
+                    articles = []
+                    cutoff_time = datetime.now() - timedelta(hours=self.config['hours_lookback'])
+                    
+                    for entry in feed.entries[:10]:  # Limit entries per source
+                        try:
+                            # Parse publication date
+                            pub_date = None
+                            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                                pub_date = datetime(*entry.published_parsed[:6])
+                            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                                pub_date = datetime(*entry.updated_parsed[:6])
+                            
+                            # Skip old articles
+                            if pub_date and pub_date < cutoff_time:
+                                continue
+                            
+                            # Extract article data
+                            article = {
+                                'source': source_name,
+                                'title': entry.get('title', ''),
+                                'link': entry.get('link', ''),
+                                'description': entry.get('description', ''),
+                                'published': pub_date.isoformat() if pub_date else datetime.now().isoformat(),
+                                'author': entry.get('author', ''),
+                                'tags': [tag.term for tag in entry.get('tags', [])]
+                            }
+                            
+                            # Check if crypto-relevant
+                            full_text = f"{article['title']} {article['description']}"
+                            if self.is_crypto_relevant(full_text):
+                                article_id = self.generate_article_id(article)
+                                if article_id not in self.processed_articles:
+                                    # Add AI analysis
+                                    article['id'] = article_id
+                                    article['sentiment'] = self.analyze_sentiment(full_text)
+                                    article['cryptocurrencies'] = self.extract_cryptocurrencies(full_text)
+                                    
+                                    articles.append(article)
+                                    self.processed_articles.add(article_id)
+                        
+                        except Exception as e:
+                            logger.error(f"Error processing entry from {source_name}: {e}")
+                            continue
+                    
+                    logger.info(f"✅ Found {len(articles)} new crypto articles from {source_name}")
+                    return articles
+                
+                else:
+                    logger.warning(f"⚠️ Failed to fetch {source_name}: HTTP {response.status}")
+                    return []
+        
+        except Exception as e:
+            logger.error(f"❌ Error fetching RSS from {source_name}: {e}")
             return []
+    
+    def format_article_for_discord(self, article: Dict[str, Any]) -> Dict[str, Any]:
+        """Format article for Discord webhook."""
+        title = article['title'][:100] + "..." if len(article['title']) > 100 else article['title']
+        description = article['description'][:300] + "..." if len(article['description']) > 300 else article['description']
         
-        targets = []
-        pattern = r'(\d+)\.\)\s*([\d.]+)\$\s*-\s*([\d.]+)\$'
-        matches = re.findall(pattern, exit_str)
+        # Get color based on sentiment
+        color_map = {
+            '📈 Bullish': 0x00ff00,  # Green
+            '📉 Bearish': 0xff0000,  # Red
+            '➡️ Neutral': 0xffff00   # Yellow
+        }
+        color = color_map.get(article.get('sentiment', '➡️ Neutral'), 0xffff00)
         
-        for match in matches:
-            level, low, high = match
-            targets.append({
-                'level': int(level),
-                'low': float(low.replace(',', '.')),
-                'high': float(high.replace(',', '.'))
+        # Create embed
+        embed = {
+            'title': title,
+            'url': article['link'],
+            'description': description,
+            'color': color,
+            'timestamp': article['published'],
+            'footer': {'text': f"FFI Crypto Bot • {article['source'].title()}"},
+            'fields': [
+                {'name': '📊 Sentiment', 'value': article.get('sentiment', 'N/A'), 'inline': True}
+            ]
+        }
+        
+        # Add cryptocurrencies if found
+        if article.get('cryptocurrencies'):
+            embed['fields'].append({
+                'name': '💰 Cryptocurrencies',
+                'value': ', '.join(article['cryptocurrencies']),
+                'inline': True
             })
         
-        return targets
+        return {'embeds': [embed]}
     
-    def _determine_tier(self, project_name: str, prev_tier: str) -> str:
-        """Determine tier from project name."""
-        if project_name.startswith('🏠'):
-            return 'main'
-        elif project_name.startswith('🎰'):
-            return 'high_risk'
-        elif project_name.startswith('⚖️'):
-            return 'mid'
-        elif project_name.startswith('🪨'):
-            return 'safety'
-        elif project_name == 'Nicht mehr priorisiert':
-            return 'not_prioritized'
-        else:
-            return prev_tier
+    def format_article_for_telegram(self, article: Dict[str, Any]) -> str:
+        """Format article for Telegram."""
+        title = article['title']
+        source = article['source'].title()
+        link = article['link']
+        sentiment = article.get('sentiment', '➡️ Neutral')
+        
+        message = f"🚀 *{title}*\n\n"
+        message += f"{sentiment}\n"
+        
+        # Add cryptocurrencies if found
+        if article.get('cryptocurrencies'):
+            message += f"💰 *Coins:* {', '.join(article['cryptocurrencies'])}\n"
+        
+        message += f"\n📰 *Source:* {source}\n"
+        message += f"🔗 [Read More]({link})\n"
+        message += f"\n_Powered by FFI Crypto Bot_ 🤖"
+        
+        return message
     
-    def load_portfolio(self) -> Dict[str, List[Dict]]:
-        """Load portfolio from CSV."""
-        tiers = {
-            'main': {'emoji': '🏠', 'name': 'Main Tier', 'coins': []},
-            'high_risk': {'emoji': '🎰', 'name': 'High Risk Tier', 'coins': []},
-            'mid': {'emoji': '⚖️', 'name': 'Mid Tier', 'coins': []},
-            'safety': {'emoji': '🪨', 'name': 'Sicherheitspolster', 'coins': []},
-        }
+    async def send_to_discord(self, articles: List[Dict[str, Any]]):
+        """Send articles to Discord webhook."""
+        if not self.config['discord_webhook']:
+            logger.info("💬 Discord webhook not configured, skipping Discord delivery")
+            return
         
         try:
-            with open(self.portfolio_path, 'r', encoding='utf-8-sig') as f:
-                reader = csv.DictReader(f)
-                rows = list(reader)
+            for article in articles:
+                payload = self.format_article_for_discord(article)
+                
+                async with self.session.post(
+                    self.config['discord_webhook'],
+                    json=payload,
+                    timeout=30
+                ) as response:
+                    if response.status == 204:
+                        logger.info(f"📤 Sent to Discord: {article['title'][:50]}...")
+                    else:
+                        logger.error(f"❌ Discord webhook failed: HTTP {response.status}")
+                
+                # Rate limiting
+                await asyncio.sleep(1)
+        
+        except Exception as e:
+            logger.error(f"❌ Error sending to Discord: {e}")
+    
+    async def send_to_telegram(self, articles: List[Dict[str, Any]]):
+        """Send articles to Telegram."""
+        if not self.config['telegram_bot_token'] or not self.config['telegram_chat_id']:
+            logger.warning("⚠️ Telegram configuration incomplete")
+            return
+        
+        try:
+            url = f"https://api.telegram.org/bot{self.config['telegram_bot_token']}/sendMessage"
             
-            current_tier = 'main'
-            
-            for row in rows:
-                project = row.get('Project', '').strip()
-                ticker = row.get('Ticker', '').strip()
+            for article in articles:
+                message = self.format_article_for_telegram(article)
                 
-                if project and not ticker:
-                    current_tier = self._determine_tier(project, current_tier)
-                    continue
-                
-                if not ticker or current_tier == 'not_prioritized':
-                    continue
-                
-                coin = {
-                    'name': project,
-                    'ticker': ticker,
-                    'buy_target': self._parse_price(row.get('Buy target', '')),
-                    'conservative_exits': self._parse_exit_targets(row.get('Conservative exits', '')),
-                    'optimistic_exits': self._parse_exit_targets(row.get('Optimistic exits', '')),
+                payload = {
+                    'chat_id': self.config['telegram_chat_id'],
+                    'text': message,
+                    'parse_mode': 'Markdown',
+                    'disable_web_page_preview': False
                 }
                 
-                tiers[current_tier]['coins'].append(coin)
-            
-            return tiers
-            
-        except Exception as e:
-            print(f"Error loading portfolio: {e}")
-            return tiers
-    
-    async def fetch_prices(self, coins: List[Dict]) -> Dict[str, float]:
-        """Fetch current prices from CoinGecko."""
-        import aiohttp
-        
-        # Map tickers to CoinGecko IDs
-        ticker_to_id = {
-            'BTC': 'bitcoin', 'ETH': 'ethereum', 'DOT': 'polkadot', 'RIO': 'realio-network',
-            'INJ': 'injective-protocol', 'TAO': 'bittensor', 'VRA': 'verasity',
-            'NMT': 'netmind-token', 'RNDR': 'render-token', 'IOTX': 'iotex',
-            'LINK': 'chainlink', 'HBAR': 'hedera-hashgraph', 'LL': 'lightlink',
-            'QUBIC': 'qubic-network', 'XNA': 'neurai', 'ONDO': 'ondo-finance',
-            'VET': 'vechain', 'DAG': 'constellation-labs'
-        }
-        
-        prices = {}
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                for coin in coins:
-                    ticker = coin['ticker']
-                    coin_id = ticker_to_id.get(ticker)
-                    
-                    if not coin_id:
-                        continue
-                    
-                    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-                    
-                    async with session.get(url) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            if coin_id in data and 'usd' in data[coin_id]:
-                                prices[ticker] = data[coin_id]['usd']
-                    
-                    await asyncio.sleep(0.5)  # Rate limiting
+                async with self.session.post(url, json=payload, timeout=30) as response:
+                    if response.status == 200:
+                        logger.info(f"📱 Sent to Telegram: {article['title'][:50]}...")
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"❌ Telegram API failed: HTTP {response.status} - {error_text}")
+                
+                # Rate limiting
+                await asyncio.sleep(1)
         
         except Exception as e:
-            print(f"Error fetching prices: {e}")
-        
-        return prices
-    
-    def analyze_signals(self, coin: Dict, price: float) -> List[str]:
-        """Analyze buy/sell signals for a coin."""
-        signals = []
-        
-        # Buy signal
-        if coin['buy_target'] and price <= coin['buy_target']:
-            diff_pct = ((coin['buy_target'] - price) / coin['buy_target']) * 100
-            signals.append(f"🟢 Kaufgelegenheit! Preis {diff_pct:.1f}% unter Kaufziel")
-        
-        # Conservative exits
-        for target in coin['conservative_exits']:
-            if target['low'] <= price <= target['high']:
-                signals.append(f"📍 Konservatives Ziel {target['level']} erreicht")
-            elif price > target['high']:
-                signals.append(f"⚠️ Konservatives Ziel {target['level']} überschritten")
-        
-        # Optimistic exits
-        for target in coin['optimistic_exits']:
-            if target['low'] <= price <= target['high']:
-                signals.append(f"🎯 Optimistisches Ziel {target['level']} erreicht")
-            elif price > target['high']:
-                signals.append(f"🚨 Optimistisches Ziel {target['level']} überschritten! 🚀")
-        
-        return signals
+            logger.error(f"❌ Error sending to Telegram: {e}")
     
     async def run(self):
-        """Run portfolio tracking."""
-        print("\n" + "="*80)
-        print("PORTFOLIO TRACKING")
-        print("="*80)
+        """Main execution function - The heart of FFI Crypto Bot."""
+        logger.info("🚀 Starting FFI Crypto News Bot - Superior to n8n!")
         
-        # Load portfolio
-        tiers = self.load_portfolio()
+        # Create aiohttp session
+        connector = aiohttp.TCPConnector(limit=20, limit_per_host=5)
+        self.session = aiohttp.ClientSession(connector=connector)
         
-        # Collect all coins
-        all_coins = []
-        for tier_data in tiers.values():
-            all_coins.extend(tier_data['coins'])
-        
-        print(f"Loaded {len(all_coins)} coins from portfolio")
-        
-        # Fetch prices
-        prices = await self.fetch_prices(all_coins)
-        print(f"Fetched prices for {len(prices)} coins")
-        
-        # Analyze and prepare Discord message
-        portfolio_data = {
-            'total_coins': len(all_coins),
-            'prices_fetched': len(prices),
-            'tiers': {},
-            'critical_signals': []
-        }
-        
-        for tier_key, tier_data in tiers.items():
-            if not tier_data['coins']:
-                continue
+        try:
+            # Fetch articles from all RSS sources concurrently
+            all_articles = []
             
-            tier_info = {
-                'name': tier_data['name'],
-                'emoji': tier_data['emoji'],
-                'coins': []
-            }
+            tasks = [
+                self.fetch_rss_feed(source_name, url)
+                for source_name, url in self.rss_sources.items()
+            ]
             
-            for coin in tier_data['coins']:
-                ticker = coin['ticker']
-                price = prices.get(ticker)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for result in results:
+                if isinstance(result, list):
+                    all_articles.extend(result)
+                elif isinstance(result, Exception):
+                    logger.error(f"❌ RSS fetch error: {result}")
+            
+            if not all_articles:
+                logger.info("📭 No new crypto articles found")
+                return
+            
+            # Sort by publication date (newest first)
+            all_articles.sort(key=lambda x: x['published'], reverse=True)
+            
+            # Limit articles per run
+            articles_to_process = all_articles[:self.config['max_articles_per_run']]
+            
+            logger.info(f"⚡ Processing {len(articles_to_process)} articles")
+            
+            # Send to platforms simultaneously
+            await asyncio.gather(
+                self.send_to_discord(articles_to_process),
+                self.send_to_telegram(articles_to_process)
+            )
+            
+            # Save processed articles
+            self.save_processed_articles()
+            
+            logger.info(f"✅ Successfully processed {len(articles_to_process)} articles")
+            
+            # Log summary
+            sources_summary = {}
+            sentiment_summary = {}
+            
+            for article in articles_to_process:
+                source = article['source']
+                sentiment = article.get('sentiment', '➡️ Neutral')
                 
-                if price:
-                    signals = self.analyze_signals(coin, price)
-                    
-                    coin_info = {
-                        'name': coin['name'],
-                        'ticker': ticker,
-                        'price': price,
-                        'signals': signals
-                    }
-                    
-                    tier_info['coins'].append(coin_info)
-                    
-                    # Collect critical signals
-                    for signal in signals:
-                        if '🚨' in signal or '🟢' in signal:
-                            portfolio_data['critical_signals'].append({
-                                'coin': f"{coin['name']} ({ticker})",
-                                'signal': signal
-                            })
+                sources_summary[source] = sources_summary.get(source, 0) + 1
+                sentiment_summary[sentiment] = sentiment_summary.get(sentiment, 0) + 1
             
-            if tier_info['coins']:
-                portfolio_data['tiers'][tier_key] = tier_info
+            logger.info(f"📊 Articles by source: {sources_summary}")
+            logger.info(f"📈 Sentiment breakdown: {sentiment_summary}")
+            logger.info("🎉 FFI Crypto Bot execution completed successfully!")
         
-        # Post to Discord
-        await self.post_portfolio_update(portfolio_data)
+        except Exception as e:
+            logger.error(f"❌ Error in main execution: {e}")
         
-        print("Portfolio tracking completed")
-    
-    async def post_portfolio_update(self, data: Dict):
-        """Post portfolio update to Discord."""
-        discord_poster = DiscordPoster(self.config)
-        
-        # Create main portfolio embed
-        embed = {
-            "title": "📈 Portfolio-Update",
-            "description": f"**📊 Portfolio-Übersicht**\n"
-                          f"Coins überwacht: {data['total_coins']}\n"
-                          f"Preise abgerufen: {data['prices_fetched']}\n"
-                          f"🟢 Kaufgelegenheiten: {sum(1 for s in data['critical_signals'] if '🟢' in s['signal'])}\n"
-                          f"🔴 Verkaufssignale: {sum(1 for s in data['critical_signals'] if '🚨' in s['signal'])}",
-            "color": 3447003,  # Blue
-            "timestamp": datetime.utcnow().isoformat(),
-            "footer": {"text": "FFI Crypto Bot - Portfolio Tracker"}
-        }
-        
-        # Add tier sections
-        for tier_key, tier_info in data['tiers'].items():
-            field_value = ""
-            
-            for coin in tier_info['coins'][:5]:  # Limit to 5 coins per tier
-                field_value += f"\n**{coin['name']} ({coin['ticker']})**\n"
-                field_value += f"Preis: ${coin['price']:,.2f}\n"
-                
-                if coin['signals']:
-                    for signal in coin['signals'][:2]:  # Limit signals
-                        field_value += f"{signal}\n"
-                
-                field_value += "\n"
-            
-            if field_value:
-                embed["fields"] = embed.get("fields", [])
-                embed["fields"].append({
-                    "name": f"{tier_info['emoji']} {tier_info['name']}",
-                    "value": field_value[:1024],  # Discord limit
-                    "inline": False
-                })
-        
-        # Post to Discord
-        await discord_poster.post_embed(embed)
-        
-        # Post critical signals separately if any
-        if data['critical_signals']:
-            critical_embed = {
-                "title": "🚨 Wichtige Portfolio-Signale",
-                "description": "\n".join([f"• **{s['coin']}**: {s['signal']}" for s in data['critical_signals'][:10]]),
-                "color": 15158332,  # Red
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            await discord_poster.post_embed(critical_embed)
-
+        finally:
+            await self.session.close()
 
 async def main():
-    """Main entry point."""
-    print("🚀 Starting FFI Crypto News Bot...")
-    
-    # Load configuration
-    config = Config()
-    
-    # Initialize components
-    news_analyzer = NewsAnalyzer(config)
-    news_summarizer = NewsSummarizer(config)
-    etf_tracker = ETFTracker(config)
-    portfolio_tracker = PortfolioTracker(config)
-    
-    # Run news analysis (existing functionality)
-    await news_analyzer.run()
-    
-    # Run portfolio tracking (new functionality)
-    try:
-        await portfolio_tracker.run()
-    except Exception as e:
-        print(f"Portfolio tracking error: {e}")
-        print("Continuing with other modules...")
-    
-    # Run news summarization
-    try:
-        await news_summarizer.run()
-    except Exception as e:
-        print(f"News summarization error: {e}")
-    
-    # Run ETF tracking
-    try:
-        await etf_tracker.run()
-    except Exception as e:
-        print(f"ETF tracking error: {e}")
-    
-    print("\n" + "="*80)
-    print("FFI CRYPTO NEWS BOT COMPLETED SUCCESSFULLY")
-    print("="*80)
-
+    """Entry point for FFI Crypto News Bot."""
+    bot = FFICryptoBot()
+    await bot.run()
 
 if __name__ == "__main__":
     asyncio.run(main())
