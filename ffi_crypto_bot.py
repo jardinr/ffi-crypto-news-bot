@@ -586,6 +586,22 @@ class FFICryptoNewsBot:
                             log(f"Skipping old article ({age_desc}): {entry.title[:50]}...")
                             continue
                         
+                        # Check if article is ABOUT old events (even if recently published)
+                        title_lower = entry.title.lower()
+                        summary_lower = getattr(entry, 'summary', '').lower()
+                        old_event_keywords = [
+                            'yesterday', 'gestern', 'einen tag nach', 'one day after',
+                            'last week', 'letzte woche', 'days ago', 'vor tagen',
+                            'last month', 'letzten monat', 'weeks ago', 'vor wochen'
+                        ]
+                        
+                        is_about_old_event = any(keyword in title_lower or keyword in summary_lower 
+                                                for keyword in old_event_keywords)
+                        
+                        if is_about_old_event:
+                            log(f"Skipping article about past events: {entry.title[:50]}...")
+                            continue
+                        
                         log(f"Found fresh article ({age_desc}): {entry.title[:50]}...")
                         
                         article = {
@@ -657,39 +673,25 @@ class FFICryptoNewsBot:
             return "[Translation error]"
     
     def format_article_for_telegram(self, article: Dict, german_title: str = None, german_desc: str = None) -> str:
-        """Format article for Telegram with Module 8 significance indicators."""
+        """Format article for Telegram in ENGLISH with Module 8 significance indicators."""
         stars = '⭐' * article['credibility']
         
-        # Translate classification to German
-        classification_de = {
-            'High Impact': 'HOHE BEDEUTUNG',
-            'Medium Impact': 'MITTLERE BEDEUTUNG',
-            'Low Impact': 'GERINGE BEDEUTUNG'
-        }.get(article['classification'], article['classification'].upper())
+        # Keep classification in English for Telegram
+        message = f"{article['classification_emoji']} **{article['classification'].upper()}**\n\n"
         
-        message = f"{article['classification_emoji']} **{classification_de}**\n\n"
-        # Use German title if available, otherwise English
-        display_title = german_title if (german_title and "[" not in german_title) else article['title']
-        display_desc = german_desc if (german_desc and "[" not in german_desc) else article['description']
+        # Use ENGLISH title and description for Telegram
+        message += f"**{article['title']}**\n\n"
         
-        message += f"**{display_title}**\n\n"
-        # Translate sentiment to German
-        sentiment_de = {
-            'Bullish': 'Bullisch',
-            'Bearish': 'Bärisch',
-            'Neutral': 'Neutral'
-        }.get(article['sentiment_label'], article['sentiment_label'])
+        message += f"📊 Significance: {article['total_score']}/5\n"
+        message += f"⭐ Credibility: {stars} ({article['credibility']}/5)\n"
+        message += f"📈 Market Impact: {article['market_impact']}/5\n"
+        message += f"🎯 Relevance: {article['relevance']}/5\n"
+        message += f"💭 Sentiment: {article['sentiment_label']} ({article['sentiment_score']:+d})\n"
+        message += f"⏰ Time Urgency: {article['time_impact']}/5\n\n"
         
-        message += f"📊 Bedeutung: {article['total_score']}/5\n"
-        message += f"⭐ Glaubwürdigkeit: {stars} ({article['credibility']}/5)\n"
-        message += f"📈 Marktauswirkung: {article['market_impact']}/5\n"
-        message += f"🎯 Relevanz: {article['relevance']}/5\n"
-        message += f"💭 Stimmung: {sentiment_de} ({article['sentiment_score']:+d})\n"
-        message += f"⏰ Zeitliche Dringlichkeit: {article['time_impact']}/5\n\n"
+        message += f"{article['description']}\n\n"
         
-        message += f"{display_desc}\n\n"
-        
-        message += f"Quelle: {article['source']} | [Mehr lesen]({article['link']})"
+        message += f"Source: {article['source']} | [Read more]({article['link']})"
         
         return message
     
