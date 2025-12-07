@@ -285,15 +285,31 @@ class FFICryptoNewsBot:
         return signals
     
     async def send_portfolio_update(self, tiers: Dict, prices: Dict[str, float], signals: Dict):
-        """Send portfolio update to Discord"""
+        """Send portfolio update to Discord (German) and Telegram (English)"""
         
-        # Build message
-        message = "📈 **Portfolio-Update**\n\n"
-        message += f"📊 **Portfolio-Übersicht**\n"
-        message += f"Coins überwacht: {sum(len(t['coins']) for t in tiers.values())}\n"
-        message += f"Preise abgerufen: {len(prices)}\n"
-        message += f"🟢 Kaufgelegenheiten: {len([s for s in signals['buy_opportunities']])}\n"
-        message += f"🔴 Verkaufssignale: {len(signals['sell_signals'])}\n\n"
+        # Build German message for Discord
+        message_de = "📈 **Portfolio-Update**\n\n"
+        message_de += f"📊 **Portfolio-Übersicht**\n"
+        message_de += f"Coins überwacht: {sum(len(t['coins']) for t in tiers.values())}\n"
+        message_de += f"Preise abgerufen: {len(prices)}\n"
+        message_de += f"🟢 Kaufgelegenheiten: {len([s for s in signals['buy_opportunities']])}\n"
+        message_de += f"🔴 Verkaufssignale: {len(signals['sell_signals'])}\n\n"
+        
+        # Build English message for Telegram
+        message_en = "📈 **Portfolio Update**\n\n"
+        message_en += f"📊 **Portfolio Overview**\n"
+        message_en += f"Coins monitored: {sum(len(t['coins']) for t in tiers.values())}\n"
+        message_en += f"Prices fetched: {len(prices)}\n"
+        message_en += f"🟢 Buy opportunities: {len([s for s in signals['buy_opportunities']])}\n"
+        message_en += f"🔴 Sell signals: {len(signals['sell_signals'])}\n\n"
+        
+        # Tier name translations
+        tier_names_en = {
+            'main': 'Main Tier',
+            'high_risk': 'High Risk Tier',
+            'mid': 'Mid Tier',
+            'safety': 'Safety Cushion'
+        }
         
         # Add tier sections
         for tier_key in ['main', 'high_risk', 'mid', 'safety']:
@@ -301,38 +317,55 @@ class FFICryptoNewsBot:
             if not tier_data['coins']:
                 continue
             
-            message += f"**{tier_data['emoji']} {tier_data['name']}**\n"
+            # German version
+            message_de += f"**{tier_data['emoji']} {tier_data['name']}**\n"
+            
+            # English version
+            message_en += f"**{tier_data['emoji']} {tier_names_en[tier_key]}**\n"
             
             for coin in tier_data['coins'][:3]:  # Show first 3 per tier
                 symbol = coin['symbol']
                 price = prices.get(symbol)
                 
                 if price:
-                    message += f"• {coin['name']} ({symbol}) - ${price:,.2f}\n"
+                    coin_line = f"• {coin['name']} ({symbol}) - ${price:,.2f}\n"
+                    message_de += coin_line
+                    message_en += coin_line
             
             if len(tier_data['coins']) > 3:
-                message += f"  ... und {len(tier_data['coins']) - 3} weitere\n"
+                message_de += f"  ... und {len(tier_data['coins']) - 3} weitere\n"
+                message_en += f"  ... and {len(tier_data['coins']) - 3} more\n"
             
-            message += "\n"
+            message_de += "\n"
+            message_en += "\n"
         
         # Add critical alerts
         if signals['critical_alerts']:
-            message += "\n🚨 **Wichtige Portfolio-Signale**\n"
+            message_de += "\n🚨 **Wichtige Portfolio-Signale**\n"
+            message_en += "\n🚨 **Important Portfolio Signals**\n"
             for alert in signals['critical_alerts'][:5]:
-                message += f"• {alert['coin']} ({alert['symbol']}): {alert['message']}\n"
+                message_de += f"• {alert['coin']} ({alert['symbol']}): {alert['message']}\n"
+                message_en += f"• {alert['coin']} ({alert['symbol']}): {alert['message']}\n"
         
-        # Send to Discord
+        # Send German to Discord
         for webhook_name, webhook_url in self.discord_webhooks:
             try:
                 async with aiohttp.ClientSession() as session:
-                    payload = {"content": message}
+                    payload = {"content": message_de}
                     async with session.post(webhook_url, json=payload) as response:
                         if response.status == 204:
-                            log(f"Portfolio update sent to {webhook_name}")
+                            log(f"Portfolio update sent to {webhook_name} (German)")
                         else:
                             log(f"Failed to send portfolio update to {webhook_name}: {response.status}")
             except Exception as e:
                 log(f"Error sending portfolio update to {webhook_name}: {e}")
+        
+        # Send English to Telegram
+        try:
+            await self.send_to_telegram(message_en)
+            log("Portfolio update sent to Telegram (English)")
+        except Exception as e:
+            log(f"Error sending portfolio update to Telegram: {e}")
     
     def load_processed_articles(self) -> set:
         """Load previously processed article URLs and last run time."""
