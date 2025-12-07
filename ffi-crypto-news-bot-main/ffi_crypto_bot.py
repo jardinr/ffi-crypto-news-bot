@@ -30,7 +30,7 @@ class FFICryptoNewsBot:
             'discord_webhook_ffi': os.getenv('DISCORD_WEBHOOK_FFI', ''),
             'openai_api_key': os.getenv('OPENAI_API_KEY', ''),
             'max_articles': int(os.getenv('MAX_ARTICLES_PER_RUN', '8')),
-            'hours_lookback': int(os.getenv('HOURS_LOOKBACK', '3')),
+            'hours_lookback': int(os.getenv('HOURS_LOOKBACK', '1')),
             'min_significance_score': float(os.getenv('MIN_SIGNIFICANCE_SCORE', '2.0'))
         }
         
@@ -86,24 +86,277 @@ class FFICryptoNewsBot:
         
         log(f"Loaded {len(self.processed_articles)} processed articles")
     
+    async def load_portfolio_from_csv(self) -> Dict:
+        """Load portfolio from notion_portfolio.csv with correct Sicherheitspolster handling"""
+        import csv
+        
+        tiers = {
+            'main': {'emoji': '🏠', 'name': 'Main Tier', 'coins': []},
+            'high_risk': {'emoji': '🎰', 'name': 'High Risk Tier', 'coins': []},
+            'mid': {'emoji': '⚖️', 'name': 'Mid Tier', 'coins': []},
+            'safety': {'emoji': '🪨', 'name': 'Sicherheitspolster', 'coins': []},
+        }
+        
+        try:
+            with open('notion_portfolio.csv', 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+            
+            current_tier = 'main'
+            skip_mode = False  # Skip coins after "Nicht mehr priorisiert" until Sicherheitspolster
+            
+            for row in rows:
+                project = row.get('Project', '').strip()
+                ticker = row.get('Ticker', '').strip()
+                
+                # Check for "Nicht mehr priorisiert" - start skipping
+                if 'nicht mehr priorisiert' in project.lower():
+                    skip_mode = True
+                    continue
+                
+                # Check for Sicherheitspolster - stop skipping
+                if project.startswith('🪨'):
+                    current_tier = 'safety'
+                    skip_mode = False
+                    continue
+                
+                # Detect other tier headers
+                if project.startswith('🏠'):
+                    current_tier = 'main'
+                    continue
+                elif project.startswith('🎰'):
+                    current_tier = 'high_risk'
+                    continue
+                elif project.startswith('⚖️'):
+                    current_tier = 'mid'
+                    continue
+                
+                # Skip if in skip mode
+                if skip_mode:
+                    continue
+                
+                # Skip empty rows
+                if not ticker or not project:
+                    continue
+                
+                # Parse targets
+                conservative = row.get('Conservative exits', '').strip()
+                optimistic = row.get('Optimistic exits', '').strip()
+                
+                coin_data = {
+                    'name': project,
+                    'symbol': ticker.upper(),
+                    'conservative_targets': self._parse_targets(conservative),
+                    'optimistic_targets': self._parse_targets(optimistic),
+                }
+                
+                tiers[current_tier]['coins'].append(coin_data)
+            
+            total_coins = sum(len(t['coins']) for t in tiers.values())
+            log(f"Loaded portfolio: {total_coins} coins across 4 tiers")
+            return tiers
+            
+        except Exception as e:
+            log(f"Error loading portfolio: {e}")
+            return tiers
+    
+    def _parse_targets(self, target_str: str) -> List[Dict]:
+        """Parse target string like '1.) 11.888$-14.273$ 2.) 21.188$-24.359$'"""
+        import re
+        
+        if not target_str or target_str == '-':
+            return []
+        
+        targets = []
+        pattern = r'(\d+)\.\)\s*([\d.]+)\$\s*-\s*([\d.]+)\$'
+        matches = re.findall(pattern, target_str)
+        
+        for match in matches:
+            level, low, high = match
+            targets.append({
+                'level': int(level),
+                'low': float(low.replace(',', '.')),
+                'high': float(high.replace(',', '.'))
+            })
+        
+        return targets
+    
+    async def fetch_coin_prices(self, symbols: List[str]) -> Dict[str, float]:
+        """Fetch current prices from CoinGecko"""
+        symbol_to_id = {
+            'BTC': 'bitcoin', 'ETH': 'ethereum', 'DOT': 'polkadot',
+            'RIO': 'realio-network', 'INJ': 'injective-protocol',
+            'TAO': 'bittensor', 'VRA': 'verasity', 'NMT': 'netmind-token',
+            'RENDER': 'render-token', 'IOTX': 'iotex', 'LINK': 'chainlink',
+            'HBAR': 'hedera-hashgraph', 'LL': 'lightlink', 'QUBIC': 'qubic-network',
+            'ZEPH': 'zephyr-protocol', 'BCH': 'bitcoin-cash', 'KNDX': 'kondux',
+            'VELO': 'velo', 'ALPH': 'alephium', 'KAS': 'kaspa',
+            'HYPE': 'hyperliquid', 'OCTA': 'octaspace', 'XNA': 'neurai',
+            'ONDO': 'ondo-finance', 'VET': 'vechain', 'DAG': 'constellation-labs'
+        }
+        
+        prices = {}
+        
+        try:
+            ids = [symbol_to_id.get(sym, sym.lower()) for sym in symbols if sym in symbol_to_id]
+            
+            if not ids:
+                return prices
+            
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(ids)}&vs_currencies=usd"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        for symbol in symbols:
+                            coin_id = symbol_to_id.get(symbol, symbol.lower())
+                            if coin_id in data and 'usd' in data[coin_id]:
+                                prices[symbol] = data[coin_id]['usd']
+            
+            log(f"Fetched prices for {len(prices)}/{len(symbols)} coins")
+            
+        except Exception as e:
+            log(f"Error fetching prices: {e}")
+        
+        return prices
+    
+    def analyze_portfolio_signals(self, tiers: Dict, prices: Dict[str, float]) -> Dict:
+        """Analyze portfolio for buy/sell signals"""
+        signals = {
+            'buy_opportunities': [],
+            'sell_signals': [],
+            'critical_alerts': []
+        }
+        
+        for tier_key, tier_data in tiers.items():
+            for coin in tier_data['coins']:
+                symbol = coin['symbol']
+                price = prices.get(symbol)
+                
+                if not price:
+                    continue
+                
+                # Check conservative targets
+                for target in coin['conservative_targets']:
+                    if price >= target['low'] and price <= target['high']:
+                        signals['sell_signals'].append({
+                            'coin': coin['name'],
+                            'symbol': symbol,
+                            'price': price,
+                            'target_level': target['level'],
+                            'target_type': 'conservative',
+                            'tier': tier_key
+                        })
+                    elif price > target['high']:
+                        signals['critical_alerts'].append({
+                            'coin': coin['name'],
+                            'symbol': symbol,
+                            'price': price,
+                            'target_level': target['level'],
+                            'target_type': 'conservative',
+                            'message': f'Konservatives Ziel {target["level"]} überschritten!',
+                            'tier': tier_key
+                        })
+                
+                # Check optimistic targets
+                for target in coin['optimistic_targets']:
+                    if price >= target['low'] and price <= target['high']:
+                        signals['sell_signals'].append({
+                            'coin': coin['name'],
+                            'symbol': symbol,
+                            'price': price,
+                            'target_level': target['level'],
+                            'target_type': 'optimistic',
+                            'tier': tier_key
+                        })
+                    elif price > target['high']:
+                        signals['critical_alerts'].append({
+                            'coin': coin['name'],
+                            'symbol': symbol,
+                            'price': price,
+                            'target_level': target['level'],
+                            'target_type': 'optimistic',
+                            'message': f'Optimistisches Ziel {target["level"]} überschritten! 🚀',
+                            'tier': tier_key
+                        })
+        
+        return signals
+    
+    async def send_portfolio_update(self, tiers: Dict, prices: Dict[str, float], signals: Dict):
+        """Send portfolio update to Discord"""
+        
+        # Build message
+        message = "📈 **Portfolio-Update**\n\n"
+        message += f"📊 **Portfolio-Übersicht**\n"
+        message += f"Coins überwacht: {sum(len(t['coins']) for t in tiers.values())}\n"
+        message += f"Preise abgerufen: {len(prices)}\n"
+        message += f"🟢 Kaufgelegenheiten: {len([s for s in signals['buy_opportunities']])}\n"
+        message += f"🔴 Verkaufssignale: {len(signals['sell_signals'])}\n\n"
+        
+        # Add tier sections
+        for tier_key in ['main', 'high_risk', 'mid', 'safety']:
+            tier_data = tiers[tier_key]
+            if not tier_data['coins']:
+                continue
+            
+            message += f"**{tier_data['emoji']} {tier_data['name']}**\n"
+            
+            for coin in tier_data['coins'][:3]:  # Show first 3 per tier
+                symbol = coin['symbol']
+                price = prices.get(symbol)
+                
+                if price:
+                    message += f"• {coin['name']} ({symbol}) - ${price:,.2f}\n"
+            
+            if len(tier_data['coins']) > 3:
+                message += f"  ... und {len(tier_data['coins']) - 3} weitere\n"
+            
+            message += "\n"
+        
+        # Add critical alerts
+        if signals['critical_alerts']:
+            message += "\n🚨 **Wichtige Portfolio-Signale**\n"
+            for alert in signals['critical_alerts'][:5]:
+                message += f"• {alert['coin']} ({alert['symbol']}): {alert['message']}\n"
+        
+        # Send to Discord
+        for webhook_name, webhook_url in self.discord_webhooks:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    payload = {"content": message}
+                    async with session.post(webhook_url, json=payload) as response:
+                        if response.status == 204:
+                            log(f"Portfolio update sent to {webhook_name}")
+                        else:
+                            log(f"Failed to send portfolio update to {webhook_name}: {response.status}")
+            except Exception as e:
+                log(f"Error sending portfolio update to {webhook_name}: {e}")
+    
     def load_processed_articles(self) -> set:
-        """Load previously processed article URLs."""
+        """Load previously processed article URLs and last run time."""
         try:
             if os.path.exists(self.processed_file):
                 with open(self.processed_file, 'r') as f:
                     data = json.load(f)
+                    self.last_run_time = data.get('last_run_time', None)
+                    if self.last_run_time:
+                        log(f"Last successful run: {self.last_run_time}")
                     return set(data.get('articles', []))
         except Exception as e:
             log(f"Could not load processed articles: {e}")
+        self.last_run_time = None
         return set()
     
     def save_processed_articles(self):
-        """Save processed article URLs."""
+        """Save processed article URLs and current run time."""
         try:
             recent_articles = list(self.processed_articles)[-100:]
             data = {
                 'articles': recent_articles,
-                'last_updated': datetime.now().isoformat()
+                'last_updated': datetime.now().isoformat(),
+                'last_run_time': datetime.now().isoformat()
             }
             with open(self.processed_file, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -116,17 +369,51 @@ class FFICryptoNewsBot:
         text = f"{title} {description}".lower()
         return any(keyword in text for keyword in self.crypto_keywords)
     
-    def is_recent(self, published_time: str, hours_back: int = None) -> bool:
-        """Check if article was published recently."""
+    def is_recent(self, published_time: str, hours_back: int = None) -> Tuple[bool, str]:
+        """Check if article was published recently. Returns (is_recent, age_description)."""
         try:
             if hours_back is None:
                 hours_back = self.config['hours_lookback']
             
-            pub_time = datetime.fromtimestamp(time.mktime(time.strptime(published_time)))
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
-            return pub_time > cutoff_time
-        except Exception:
-            return True
+            # Try multiple date formats
+            pub_time = None
+            for fmt in ['%a, %d %b %Y %H:%M:%S %z', '%a, %d %b %Y %H:%M:%S %Z', 
+                       '%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%SZ']:
+                try:
+                    pub_time = datetime.strptime(published_time, fmt)
+                    if pub_time.tzinfo is None:
+                        pub_time = pub_time.replace(tzinfo=None)
+                    else:
+                        pub_time = pub_time.replace(tzinfo=None)  # Convert to naive for comparison
+                    break
+                except:
+                    continue
+            
+            if pub_time is None:
+                # Fallback to feedparser time parsing
+                try:
+                    pub_time = datetime.fromtimestamp(time.mktime(time.strptime(published_time)))
+                except:
+                    log(f"Could not parse timestamp: {published_time}")
+                    return (False, "unknown age")  # Reject articles with unparseable dates
+            
+            now = datetime.now()
+            age = now - pub_time
+            cutoff_time = now - timedelta(hours=hours_back)
+            
+            # Calculate age description
+            if age.total_seconds() < 3600:
+                age_desc = f"{int(age.total_seconds() / 60)} minutes old"
+            elif age.total_seconds() < 86400:
+                age_desc = f"{int(age.total_seconds() / 3600)} hours old"
+            else:
+                age_desc = f"{int(age.total_seconds() / 86400)} days old"
+            
+            is_recent = pub_time > cutoff_time
+            return (is_recent, age_desc)
+        except Exception as e:
+            log(f"Error checking article age: {e}")
+            return (False, "error parsing date")
     
     def calculate_market_impact_score(self, title: str, description: str) -> int:
         """Calculate market impact score (1-5) - Module 8 feature."""
@@ -282,24 +569,61 @@ class FFICryptoNewsBot:
                     
                     articles = []
                     for entry in feed.entries:
-                        if (entry.link not in self.processed_articles and
-                            self.is_crypto_related(entry.title, getattr(entry, 'summary', '')) and
-                            self.is_recent(getattr(entry, 'published', ''))):
-                            
-                            article = {
-                                'title': entry.title,
-                                'link': entry.link,
-                                'description': getattr(entry, 'summary', '')[:300],
-                                'source': name,
-                                'published': getattr(entry, 'published', ''),
-                                'credibility': credibility
-                            }
-                            
-                            # Calculate significance scores
-                            scores = self.calculate_significance_score(article, credibility)
-                            article.update(scores)
-                            
-                            articles.append(article)
+                        # Check if crypto-related first
+                        if not self.is_crypto_related(entry.title, getattr(entry, 'summary', '')):
+                            continue
+                        
+                        # Check recency with age info
+                        published = getattr(entry, 'published', '')
+                        is_recent, age_desc = self.is_recent(published)
+                        
+                        # Skip if already processed
+                        if entry.link in self.processed_articles:
+                            continue
+                        
+                        # Skip if not recent
+                        if not is_recent:
+                            log(f"Skipping old article ({age_desc}): {entry.title[:50]}...")
+                            continue
+                        
+                        # Check if article is ABOUT old events (even if recently published)
+                        title_lower = entry.title.lower()
+                        summary_lower = getattr(entry, 'summary', '').lower()
+                        old_event_keywords = [
+                            # Past time references
+                            'yesterday', 'gestern', 'einen tag nach', 'one day after',
+                            'last week', 'letzte woche', 'days ago', 'vor tagen',
+                            'last month', 'letzten monat', 'weeks ago', 'vor wochen',
+                            # Daily summaries and newsletters
+                            'tagesnachrichten', 'daily news', 'the daily', 'newsletter',
+                            'daily roundup', 'roundup', 'zusammenfassung', 'wochentagnachmittagen',
+                            'weekly roundup', 'wochenrückblick', 'recap', 'rückblick'
+                        ]
+                        
+                        is_about_old_event = any(keyword in title_lower or keyword in summary_lower 
+                                                for keyword in old_event_keywords)
+                        
+                        if is_about_old_event:
+                            log(f"Skipping article about past events: {entry.title[:50]}...")
+                            continue
+                        
+                        log(f"Found fresh article ({age_desc}): {entry.title[:50]}...")
+                        
+                        article = {
+                            'title': entry.title,
+                            'link': entry.link,
+                            'description': getattr(entry, 'summary', '')[:300],
+                            'source': name,
+                            'published': published,
+                            'credibility': credibility,
+                            'age': age_desc
+                        }
+                        
+                        # Calculate significance scores
+                        scores = self.calculate_significance_score(article, credibility)
+                        article.update(scores)
+                        
+                        articles.append(article)
                     
                     log(f"Found {len(articles)} new crypto articles from {name}")
                     return articles
@@ -354,39 +678,25 @@ class FFICryptoNewsBot:
             return "[Translation error]"
     
     def format_article_for_telegram(self, article: Dict, german_title: str = None, german_desc: str = None) -> str:
-        """Format article for Telegram with Module 8 significance indicators."""
+        """Format article for Telegram in ENGLISH with Module 8 significance indicators."""
         stars = '⭐' * article['credibility']
         
-        # Translate classification to German
-        classification_de = {
-            'High Impact': 'HOHE BEDEUTUNG',
-            'Medium Impact': 'MITTLERE BEDEUTUNG',
-            'Low Impact': 'GERINGE BEDEUTUNG'
-        }.get(article['classification'], article['classification'].upper())
+        # Keep classification in English for Telegram
+        message = f"{article['classification_emoji']} **{article['classification'].upper()}**\n\n"
         
-        message = f"{article['classification_emoji']} **{classification_de}**\n\n"
-        # Use German title if available, otherwise English
-        display_title = german_title if (german_title and "[" not in german_title) else article['title']
-        display_desc = german_desc if (german_desc and "[" not in german_desc) else article['description']
+        # Use ENGLISH title and description for Telegram
+        message += f"**{article['title']}**\n\n"
         
-        message += f"**{display_title}**\n\n"
-        # Translate sentiment to German
-        sentiment_de = {
-            'Bullish': 'Bullisch',
-            'Bearish': 'Bärisch',
-            'Neutral': 'Neutral'
-        }.get(article['sentiment_label'], article['sentiment_label'])
+        message += f"📊 Significance: {article['total_score']}/5\n"
+        message += f"⭐ Credibility: {stars} ({article['credibility']}/5)\n"
+        message += f"📈 Market Impact: {article['market_impact']}/5\n"
+        message += f"🎯 Relevance: {article['relevance']}/5\n"
+        message += f"💭 Sentiment: {article['sentiment_label']} ({article['sentiment_score']:+d})\n"
+        message += f"⏰ Time Urgency: {article['time_impact']}/5\n\n"
         
-        message += f"📊 Bedeutung: {article['total_score']}/5\n"
-        message += f"⭐ Glaubwürdigkeit: {stars} ({article['credibility']}/5)\n"
-        message += f"📈 Marktauswirkung: {article['market_impact']}/5\n"
-        message += f"🎯 Relevanz: {article['relevance']}/5\n"
-        message += f"💭 Stimmung: {sentiment_de} ({article['sentiment_score']:+d})\n"
-        message += f"⏰ Zeitliche Dringlichkeit: {article['time_impact']}/5\n\n"
+        message += f"{article['description']}\n\n"
         
-        message += f"{display_desc}\n\n"
-        
-        message += f"Quelle: {article['source']} | [Mehr lesen]({article['link']})"
+        message += f"Source: {article['source']} | [Read more]({article['link']})"
         
         return message
     
@@ -575,6 +885,26 @@ class FFICryptoNewsBot:
             self.save_processed_articles()
             
             log("\n" + "=" * 80)
+            
+            # Portfolio tracking
+            log("\n" + "=" * 80)
+            log("STARTING PORTFOLIO TRACKING")
+            log("=" * 80)
+            
+            try:
+                tiers = await self.load_portfolio_from_csv()
+                all_symbols = []
+                for tier_data in tiers.values():
+                    all_symbols.extend([coin['symbol'] for coin in tier_data['coins']])
+                
+                prices = await self.fetch_coin_prices(all_symbols)
+                signals = self.analyze_portfolio_signals(tiers, prices)
+                await self.send_portfolio_update(tiers, prices, signals)
+                
+                log("Portfolio tracking completed successfully")
+            except Exception as e:
+                log(f"Portfolio tracking error: {e}")
+            
             log("FFI CRYPTO NEWS BOT COMPLETED SUCCESSFULLY")
             log("=" * 80)
             
